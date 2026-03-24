@@ -507,9 +507,10 @@ def build_welcome_banner(console: Console, model: str, cwd: str,
         if behind and behind > 0:
             from hermes_cli.config import recommended_update_command
             commits_word = "commit" if behind == 1 else "commits"
+            warn = _skin_color("ui_warn", "yellow")
             right_lines.append(
-                f"[bold yellow]⚠ {behind} {commits_word} behind[/]"
-                f"[dim yellow] — run [bold]{recommended_update_command()}[/bold] to update[/]"
+                f"[bold {warn}]⚠ {behind} {commits_word} behind[/]"
+                f"[dim {warn}] — run [bold]{recommended_update_command()}[/bold] to update[/]"
             )
     except Exception:
         pass  # Never break the banner over an update check
