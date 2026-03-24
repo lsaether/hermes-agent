@@ -410,9 +410,10 @@ def build_welcome_banner(console: Console, model: str, cwd: str,
         behind = get_update_result(timeout=0.5)
         if behind and behind > 0:
             commits_word = "commit" if behind == 1 else "commits"
+            warn = _skin_color("ui_warn", "yellow")
             right_lines.append(
-                f"[bold yellow]⚠ {behind} {commits_word} behind[/]"
-                f"[dim yellow] — run [bold]hermes update[/bold] to update[/]"
+                f"[bold {warn}]⚠ {behind} {commits_word} behind[/]"
+                f"[dim {warn}] — run [bold]hermes update[/bold] to update[/]"
             )
     except Exception:
         pass  # Never break the banner over an update check

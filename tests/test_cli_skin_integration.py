@@ -66,6 +66,12 @@ class TestCliSkinPromptIntegration:
         assert style_dict["prompt"] == skin.get_color("prompt")
         assert style_dict["input-rule"] == skin.get_color("input_rule")
         assert style_dict["prompt-working"] == f"{skin.get_color('banner_dim')} italic"
+        assert style_dict["status-bar-strong"] == f"bg:#1a1a2e {skin.get_color('ui_accent')} bold"
+        assert style_dict["status-bar-dim"] == f"bg:#1a1a2e {skin.get_color('session_border')}"
+        assert style_dict["status-bar-good"] == f"bg:#1a1a2e {skin.get_color('ui_ok')} bold"
+        assert style_dict["status-bar-warn"] == f"bg:#1a1a2e {skin.get_color('ui_warn')} bold"
+        assert style_dict["status-bar-bad"] == f"bg:#1a1a2e {skin.get_color('ui_warn')} bold"
+        assert style_dict["status-bar-critical"] == f"bg:#1a1a2e {skin.get_color('ui_error')} bold"
         assert style_dict["approval-title"] == f"{skin.get_color('ui_warn')} bold"
 
     def test_apply_tui_skin_style_updates_running_app(self):

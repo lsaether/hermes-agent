@@ -688,8 +688,11 @@ def get_prompt_toolkit_style_overrides() -> Dict[str, str]:
     text = skin.get_color("banner_text", prompt)
     dim = skin.get_color("banner_dim", "#555555")
     label = skin.get_color("ui_label", title)
+    accent = skin.get_color("ui_accent", title)
+    ok = skin.get_color("ui_ok", "#8FBC8F")
     warn = skin.get_color("ui_warn", "#FF8C00")
     error = skin.get_color("ui_error", "#FF6B6B")
+    session_dim = skin.get_color("session_border", dim)
 
     return {
         "input-area": prompt,
@@ -699,6 +702,12 @@ def get_prompt_toolkit_style_overrides() -> Dict[str, str]:
         "hint": f"{dim} italic",
         "input-rule": input_rule,
         "image-badge": f"{label} bold",
+        "status-bar-strong": f"bg:#1a1a2e {accent} bold",
+        "status-bar-dim": f"bg:#1a1a2e {session_dim}",
+        "status-bar-good": f"bg:#1a1a2e {ok} bold",
+        "status-bar-warn": f"bg:#1a1a2e {warn} bold",
+        "status-bar-bad": f"bg:#1a1a2e {warn} bold",
+        "status-bar-critical": f"bg:#1a1a2e {error} bold",
         "completion-menu": f"bg:#1a1a2e {text}",
         "completion-menu.completion": f"bg:#1a1a2e {text}",
         "completion-menu.completion.current": f"bg:#333355 {title}",

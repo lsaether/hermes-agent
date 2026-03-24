@@ -2576,17 +2576,26 @@ class HermesCLI:
             api_indicator = "[red bold]●[/]"
         
         # Build status line with proper markup
+        accent = _accent_hex()
+        dim_color = "#8B8682"
+        try:
+            from hermes_cli.skin_engine import get_active_skin
+            skin = get_active_skin()
+            dim_color = skin.get_color("banner_dim", dim_color)
+        except Exception:
+            pass
+
         toolsets_info = ""
         if self.enabled_toolsets and "all" not in self.enabled_toolsets:
-            toolsets_info = f" [dim #B8860B]·[/] [#CD7F32]toolsets: {', '.join(self.enabled_toolsets)}[/]"
+            toolsets_info = f" [dim {dim_color}]·[/] [{accent}]toolsets: {', '.join(self.enabled_toolsets)}[/]"
 
-        provider_info = f" [dim #B8860B]·[/] [dim]provider: {self.provider}[/]"
+        provider_info = f" [dim {dim_color}]·[/] [dim]provider: {self.provider}[/]"
         if self._provider_source:
-            provider_info += f" [dim #B8860B]·[/] [dim]auth: {self._provider_source}[/]"
+            provider_info += f" [dim {dim_color}]·[/] [dim]auth: {self._provider_source}[/]"
 
         self.console.print(
-            f"  {api_indicator} [#FFBF00]{model_short}[/] "
-            f"[dim #B8860B]·[/] [bold cyan]{tool_count} tools[/]"
+            f"  {api_indicator} [{accent}]{model_short}[/] "
+            f"[dim {dim_color}]·[/] [bold cyan]{tool_count} tools[/]"
             f"{toolsets_info}{provider_info}"
         )
     
