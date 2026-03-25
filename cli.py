@@ -2452,10 +2452,12 @@ class HermesCLI:
                 _skin = get_active_skin()
                 label = _skin.get_branding("response_label", "⚕ Hermes")
                 _text_hex = _skin.get_color("banner_text", "#FFF8DC")
+                _border_hex = _skin.get_color("response_border", "#CD7F32")
             except Exception:
                 label = "⚕ Hermes"
                 _text_hex = "#FFF8DC"
-            # Build a true-color ANSI escape for the response text color
+                _border_hex = "#CD7F32"
+            # Build true-color ANSI escapes for the response text and border
             # so streamed content matches the Rich Panel appearance.
             try:
                 _r = int(_text_hex[1:3], 16)
@@ -2464,9 +2466,17 @@ class HermesCLI:
                 self._stream_text_ansi = f"\033[38;2;{_r};{_g};{_b}m"
             except (ValueError, IndexError):
                 self._stream_text_ansi = ""
+            try:
+                _br = int(_border_hex[1:3], 16)
+                _bg = int(_border_hex[3:5], 16)
+                _bb = int(_border_hex[5:7], 16)
+                self._stream_border_ansi = f"\033[1;38;2;{_br};{_bg};{_bb}m"
+            except (ValueError, IndexError):
+                self._stream_border_ansi = _GOLD
             w = shutil.get_terminal_size().columns
             fill = w - 2 - len(label)
-            _cprint(f"\n{_GOLD}╭─{label}{'─' * max(fill - 1, 0)}╮{_RST}")
+            _bc = getattr(self, "_stream_border_ansi", _GOLD)
+            _cprint(f"\n{_bc}╭─{label}{'─' * max(fill - 1, 0)}╮{_RST}")
 
         self._stream_buf += text
 
@@ -2497,7 +2507,8 @@ class HermesCLI:
         # Close the response box
         if self._stream_box_opened:
             w = shutil.get_terminal_size().columns
-            _cprint(f"{_GOLD}╰{'─' * (w - 2)}╯{_RST}")
+            _bc = getattr(self, "_stream_border_ansi", _GOLD)
+            _cprint(f"{_bc}╰{'─' * (w - 2)}╯{_RST}")
 
     def _reset_stream_state(self) -> None:
         """Reset streaming state before each agent invocation."""
@@ -2505,6 +2516,7 @@ class HermesCLI:
         self._stream_started = False
         self._stream_box_opened = False
         self._stream_text_ansi = ""
+        self._stream_border_ansi = ""
         self._stream_prefilt = ""
         self._in_reasoning_block = False
         self._stream_last_was_newline = True
@@ -2921,14 +2933,14 @@ class HermesCLI:
             if session_meta.get("title"):
                 title_part = f' "{session_meta["title"]}"'
             self.console.print(
-                f"[#DAA520]↻ Resumed session [bold]{self.session_id}[/bold]"
+                f"[{_accent_hex()}]↻ Resumed session [bold]{self.session_id}[/bold]"
                 f"{title_part} "
                 f"({msg_count} user message{'s' if msg_count != 1 else ''}, "
                 f"{len(restored)} total messages)[/]"
             )
         else:
             self.console.print(
-                f"[#DAA520]Session {self.session_id} found but has no "
+                f"[{_accent_hex()}]Session {self.session_id} found but has no "
                 f"messages. Starting fresh.[/]"
             )
             return False
