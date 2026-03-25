@@ -118,6 +118,7 @@ class SkinConfig:
     colors: Dict[str, str] = field(default_factory=dict)
     spinner: Dict[str, Any] = field(default_factory=dict)
     branding: Dict[str, str] = field(default_factory=dict)
+    animations: Dict[str, Any] = field(default_factory=dict)
     tool_prefix: str = "┊"
     tool_emojis: Dict[str, str] = field(default_factory=dict)  # per-tool emoji overrides
     banner_logo: str = ""    # Rich-markup ASCII art logo (replaces HERMES_AGENT_LOGO)
@@ -541,6 +542,8 @@ def _build_skin_config(data: Dict[str, Any]) -> SkinConfig:
     spinner.update(data.get("spinner", {}))
     branding = dict(default.get("branding", {}))
     branding.update(data.get("branding", {}))
+    animations = dict(default.get("animations", {}))
+    animations.update(data.get("animations", {}))
 
     return SkinConfig(
         name=data.get("name", "unknown"),
@@ -548,6 +551,7 @@ def _build_skin_config(data: Dict[str, Any]) -> SkinConfig:
         colors=colors,
         spinner=spinner,
         branding=branding,
+        animations=animations,
         tool_prefix=data.get("tool_prefix", default.get("tool_prefix", "┊")),
         tool_emojis=data.get("tool_emojis", {}),
         banner_logo=data.get("banner_logo", ""),

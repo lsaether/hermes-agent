@@ -61,6 +61,78 @@ def _skin_branding(key: str, fallback: str) -> str:
         return fallback
 
 
+def _hex_to_ansi(color: str, *, bold: bool = False) -> str:
+    """Convert #RRGGBB to a true-color ANSI escape, or return reset on failure."""
+    try:
+        color = color.strip()
+        if not color.startswith("#") or len(color) != 7:
+            return _RST
+        r = int(color[1:3], 16)
+        g = int(color[3:5], 16)
+        b = int(color[5:7], 16)
+        prefix = "1;" if bold else ""
+        return f"\033[{prefix}38;2;{r};{g};{b}m"
+    except Exception:
+        return _RST
+
+
+def _render_startup_rain(console: Console, skin) -> None:
+    """Render a brief matrix-like rain animation before the static banner.
+
+    This is intentionally subtle: a few fast frames in a narrow band that gets
+    cleared immediately before the actual logo prints.
+    """
+    if not skin or not getattr(skin, "animations", {}).get("startup_rain"):
+        return
+    if not getattr(console, "is_terminal", False):
+        return
+    if os.getenv("CI"):
+        return
+
+    width = shutil.get_terminal_size().columns
+    if width < 70:
+        return
+
+    rows = 6
+    columns = [6, 15, 24, 36, 47, 58]
+    if width >= 110:
+        columns.extend([70, 82])
+    glyphs = ["0", "1", "A", "X", "7", "K", "N", "5", "Z", "Q", "3", "V"]
+
+    head = _hex_to_ansi(skin.get_color("banner_title", "#C7E2CF"), bold=True)
+    trail = _hex_to_ansi(skin.get_color("ui_accent", "#9AC7A3"))
+    dim = _hex_to_ansi(skin.get_color("banner_dim", "#5E7A66"))
+
+    def _frame_lines(frame_idx: int) -> list[str]:
+        lines: list[str] = []
+        for row in range(rows):
+            line = [" "] * min(width, 92)
+            for col_idx, col in enumerate(columns):
+                top = (frame_idx + col_idx * 2) % (rows + 5) - 2
+                for trail_idx in range(3):
+                    r = top - trail_idx
+                    if r != row or col >= len(line):
+                        continue
+                    glyph = glyphs[(frame_idx + col_idx + trail_idx) % len(glyphs)]
+                    color = head if trail_idx == 0 else (trail if trail_idx == 1 else dim)
+                    line[col] = f"{color}{glyph}{_RST}"
+            lines.append("".join(line).rstrip())
+        return lines
+
+    for frame_idx in range(rows + 2):
+        for line in _frame_lines(frame_idx):
+            cprint(line)
+        time.sleep(0.055)
+        if frame_idx != rows + 1:
+            cprint(f"\033[{rows}A")
+
+    cprint(f"\033[{rows}A")
+    for _ in range(rows):
+        cprint("\033[2K")
+        cprint("\033[1B")
+    cprint(f"\033[{rows}A")
+
+
 # =========================================================================
 # ASCII Art & Branding
 # =========================================================================
@@ -434,6 +506,7 @@ def build_welcome_banner(console: Console, model: str, cwd: str,
     console.print()
     term_width = shutil.get_terminal_size().columns
     if term_width >= 95:
+        _render_startup_rain(console, _bskin)
         _logo = _bskin.banner_logo if _bskin and hasattr(_bskin, 'banner_logo') and _bskin.banner_logo else HERMES_AGENT_LOGO
         console.print(_logo)
         console.print()

@@ -1,5 +1,6 @@
 """Tests for banner toolset name normalization and skin color usage."""
 
+import os
 from unittest.mock import patch
 
 from rich.console import Console
@@ -68,3 +69,31 @@ def test_build_welcome_banner_uses_normalized_toolset_names():
     assert "homeassistant_tools:" not in output
     assert "honcho_tools:" not in output
     assert "web_tools:" not in output
+
+
+def test_build_welcome_banner_runs_startup_rain_before_logo_when_enabled():
+    with (
+        patch.object(model_tools, "check_tool_availability", return_value=([], [])),
+        patch.object(banner, "get_available_skills", return_value={}),
+        patch.object(banner, "get_update_result", return_value=None),
+        patch.object(tools.mcp_tool, "get_mcp_status", return_value=[]),
+        patch.object(banner, "_render_startup_rain") as mock_rain,
+        patch.object(banner.shutil, "get_terminal_size", return_value=os.terminal_size((160, 40))),
+        patch("hermes_cli.skin_engine.get_active_skin", return_value=type("Skin", (), {
+            "banner_logo": "LOGO",
+            "banner_hero": "HERO",
+            "animations": {"startup_rain": True},
+            "get_color": lambda self, key, fallback="": fallback,
+            "get_branding": lambda self, key, fallback="": fallback,
+        })()),
+    ):
+        console = Console(record=True, force_terminal=False, color_system=None, width=160)
+        banner.build_welcome_banner(
+            console=console,
+            model="anthropic/test-model",
+            cwd="/tmp/project",
+            tools=[],
+            get_toolset_for_tool=lambda name: None,
+        )
+
+    mock_rain.assert_called_once()

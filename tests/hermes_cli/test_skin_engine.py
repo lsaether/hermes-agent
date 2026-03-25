@@ -27,6 +27,7 @@ class TestSkinConfig:
         assert "banner_title" in skin.colors
         assert "banner_border" in skin.colors
         assert "agent_name" in skin.branding
+        assert skin.animations == {}
 
     def test_get_color_with_fallback(self):
         from hermes_cli.skin_engine import load_skin
@@ -92,6 +93,17 @@ class TestBuiltinSkins:
         from hermes_cli.skin_engine import load_skin
         skin = load_skin("nonexistent_skin_xyz")
         assert skin.name == "default"
+
+    def test_build_skin_config_merges_animation_settings(self):
+        from hermes_cli.skin_engine import _build_skin_config
+
+        skin = _build_skin_config({
+            "name": "matrix-test",
+            "animations": {"startup_rain": True, "intensity": "subtle"},
+        })
+
+        assert skin.animations["startup_rain"] is True
+        assert skin.animations["intensity"] == "subtle"
 
     def test_all_builtin_skins_have_complete_colors(self):
         from hermes_cli.skin_engine import _BUILTIN_SKINS, _build_skin_config
