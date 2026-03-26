@@ -12,6 +12,7 @@ from hermes_cli.auth import (
     AuthError,
     DEFAULT_CODEX_BASE_URL,
     PROVIDER_REGISTRY,
+    _refresh_codex_auth_tokens,
     _read_codex_tokens,
     _save_codex_tokens,
     _import_codex_cli_tokens,
@@ -122,6 +123,87 @@ def test_resolve_codex_runtime_credentials_force_refresh(tmp_path, monkeypatch):
     assert resolved["api_key"] == "access-forced"
 
 
+def test_resolve_codex_runtime_credentials_recovers_from_cli_when_hermes_refresh_fails(
+    tmp_path, monkeypatch
+):
+    hermes_home = tmp_path / "hermes"
+    codex_home = tmp_path / "codex-cli"
+    expiring_token=_jwt_with_exp(int(time.time()) - 10)
+    cli_token=_jwt_with_exp(int(time.time()) + 3600)
+    _setup_hermes_auth(hermes_home, access_token=expiring_token, refresh_token="hermes-refresh")
+    codex_home.mkdir(parents=True, exist_ok=True)
+    (codex_home / "auth.json").write_text(
+        json.dumps(
+            {
+                "tokens": {
+                    "access_token": cli_token,
+                    "refresh_token": "cli-refresh",
+                }
+            }
+        )
+    )
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    def _fake_refresh(tokens, timeout_seconds):
+        raise AuthError(
+            "Codex token refresh failed with status 401.",
+            provider="openai-codex",
+            code="codex_refresh_failed",
+            relogin_required=True,
+        )
+
+    monkeypatch.setattr("hermes_cli.auth._refresh_codex_auth_tokens", _fake_refresh)
+
+    resolved = resolve_codex_runtime_credentials()
+
+    assert resolved["api_key"] == cli_token
+    saved = _read_codex_tokens()
+    assert saved["tokens"]["access_token"] == cli_token
+    assert saved["tokens"]["refresh_token"] == "cli-refresh"
+
+
+def test_resolve_codex_runtime_credentials_does_not_recover_from_cli_on_non_relogin_failure(
+    tmp_path, monkeypatch
+):
+    hermes_home = tmp_path / "hermes"
+    codex_home = tmp_path / "codex-cli"
+    expiring_token=_jwt_with_exp(int(time.time()) - 10)
+    cli_token=_jwt_with_exp(int(time.time()) + 3600)
+    _setup_hermes_auth(hermes_home, access_token=expiring_token, refresh_token="hermes-refresh")
+    codex_home.mkdir(parents=True, exist_ok=True)
+    (codex_home / "auth.json").write_text(
+        json.dumps(
+            {
+                "tokens": {
+                    "access_token": cli_token,
+                    "refresh_token": "cli-refresh",
+                }
+            }
+        )
+    )
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+
+    def _fake_refresh(tokens, timeout_seconds):
+        raise AuthError(
+            "Codex refresh timed out.",
+            provider="openai-codex",
+            code="codex_refresh_timeout",
+            relogin_required=False,
+        )
+
+    monkeypatch.setattr("hermes_cli.auth._refresh_codex_auth_tokens", _fake_refresh)
+
+    with pytest.raises(AuthError) as exc:
+        resolve_codex_runtime_credentials()
+
+    assert exc.value.code == "codex_refresh_timeout"
+    saved = _read_codex_tokens()
+    assert saved["tokens"]["access_token"] == expiring_token
+    assert saved["tokens"]["refresh_token"] == "hermes-refresh"
+
+
 def test_resolve_provider_explicit_codex_does_not_fallback(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
@@ -190,3 +272,34 @@ def test_resolve_returns_hermes_auth_store_source(tmp_path, monkeypatch):
     assert creds["source"] == "hermes-auth-store"
     assert creds["provider"] == "openai-codex"
     assert creds["base_url"] == DEFAULT_CODEX_BASE_URL
+
+
+def test_refresh_codex_auth_tokens_marks_401_as_relogin_required(monkeypatch):
+    class _FakeResponse:
+        status_code = 401
+
+        def json(self):
+            raise ValueError("no json")
+
+    class _FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def post(self, *args, **kwargs):
+            return _FakeResponse()
+
+    monkeypatch.setattr("hermes_cli.auth.httpx.Client", _FakeClient)
+
+    with pytest.raises(AuthError) as exc:
+        _refresh_codex_auth_tokens(
+            {"access_token": "access-old", "refresh_token": "refresh-old"},
+            5.0,
+        )
+    assert exc.value.code == "codex_refresh_failed"
+    assert exc.value.relogin_required is True
