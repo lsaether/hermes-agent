@@ -1317,7 +1317,7 @@ def refresh_codex_oauth_pure(
     if response.status_code != 200:
         code = "codex_refresh_failed"
         message = f"Codex token refresh failed with status {response.status_code}."
-        relogin_required = False
+        relogin_required = response.status_code == 401
         try:
             err = response.json()
             if isinstance(err, dict):
@@ -1431,6 +1431,52 @@ def _import_codex_cli_tokens() -> Optional[Dict[str, str]]:
         return None
 
 
+def _recover_codex_tokens_from_cli(
+    current_tokens: Dict[str, str],
+    *,
+    refresh_skew_seconds: int,
+    failure: Exception,
+) -> Optional[Dict[str, str]]:
+    """Adopt a still-valid Codex CLI session when Hermes's stored session dies.
+
+    Hermes keeps its own auth store to avoid refresh-token rotation conflicts with
+    the Codex CLI. In practice, users can still end up with a stale Hermes session
+    while ``~/.codex/auth.json`` has a newer valid access token. When that happens,
+    recover by importing the Codex CLI tokens into Hermes's store instead of
+    forcing a manual logout/re-login cycle.
+    """
+    cli_tokens = _import_codex_cli_tokens()
+    if not cli_tokens:
+        return None
+
+    cli_access_token = str(cli_tokens.get("access_token", "") or "").strip()
+    cli_refresh_token = str(cli_tokens.get("refresh_token", "") or "").strip()
+    if not cli_access_token or not cli_refresh_token:
+        return None
+    if (
+        cli_access_token == str(current_tokens.get("access_token", "") or "").strip()
+        and cli_refresh_token == str(current_tokens.get("refresh_token", "") or "").strip()
+    ):
+        return None
+    if _codex_access_token_is_expiring(cli_access_token, refresh_skew_seconds):
+        return None
+
+    logger.warning(
+        "Recovering Codex credentials from ~/.codex/auth.json after Hermes refresh failed: %s",
+        failure,
+    )
+    _save_codex_tokens(
+        {
+            "access_token": cli_access_token,
+            "refresh_token": cli_refresh_token,
+        }
+    )
+    return {
+        "access_token": cli_access_token,
+        "refresh_token": cli_refresh_token,
+    }
+
+
 def resolve_codex_runtime_credentials(
     *,
     force_refresh: bool = False,
@@ -1476,8 +1522,21 @@ def resolve_codex_runtime_credentials(
                 should_refresh = _codex_access_token_is_expiring(access_token, refresh_skew_seconds)
 
             if should_refresh:
-                tokens = _refresh_codex_auth_tokens(tokens, refresh_timeout_seconds)
-                access_token = str(tokens.get("access_token", "") or "").strip()
+                try:
+                    tokens=_refresh_codex_auth_tokens(tokens, refresh_timeout_seconds)
+                except AuthError as exc:
+                    if not exc.relogin_required:
+                        raise
+                    recovered_tokens=_recover_codex_tokens_from_cli(
+                        tokens,
+                        refresh_skew_seconds=refresh_skew_seconds,
+                        failure=exc,
+                    )
+                    if recovered_tokens is None:
+                        raise
+                    tokens=recovered_tokens
+                    data = _read_codex_tokens(_lock=False)
+                access_token=str(tokens.get("access_token", "") or "").strip()
 
     base_url = (
         os.getenv("HERMES_CODEX_BASE_URL", "").strip().rstrip("/")
