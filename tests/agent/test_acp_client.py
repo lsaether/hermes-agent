@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
+import tempfile
 import threading
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest import mock
@@ -13,7 +16,9 @@ import pytest
 
 from agent.acp_client import (
     ACPClient,
+    _ensure_path_within_cwd,
     _format_messages_as_prompt,
+    _jsonrpc_error,
     _render_message_content,
     extract_agent_from_url,
 )
@@ -249,3 +254,257 @@ class TestACPProtocolFlow:
 
             assert result.choices[0].message.content == "answer"
             assert result.choices[0].message.reasoning == "thinking..."
+
+    def test_agent_not_found_error(self):
+        """FileNotFoundError from Popen becomes a clear RuntimeError."""
+        with mock.patch("subprocess.Popen", side_effect=FileNotFoundError("not found")):
+            client = ACPClient(agent_name="gemini")
+            with pytest.raises(RuntimeError, match="Could not start ACP agent 'gemini'"):
+                client.chat.completions.create(
+                    messages=[{"role": "user", "content": "Hi"}],
+                )
+
+    def test_process_exits_early_with_stderr(self):
+        """Process dying mid-flow surfaces stderr in the error."""
+        responses = [
+            {"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": 1}},
+        ]
+        proc = self._make_mock_process(responses)
+        # Simulate process dying after initialize
+        proc.poll.return_value = 1
+        proc.stderr = iter(["Fatal: auth token expired\n"])
+
+        with mock.patch("subprocess.Popen", return_value=proc):
+            client = ACPClient(agent_name="gemini")
+            with pytest.raises(RuntimeError, match="auth token expired"):
+                client.chat.completions.create(
+                    messages=[{"role": "user", "content": "Hi"}],
+                )
+
+    def test_acp_error_response(self):
+        """ACP protocol error in response is surfaced."""
+        responses = [
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "error": {"code": -32000, "message": "Authentication required"},
+            },
+        ]
+        with mock.patch("subprocess.Popen", return_value=self._make_mock_process(responses)):
+            client = ACPClient(agent_name="gemini")
+            with pytest.raises(RuntimeError, match="Authentication required"):
+                client.chat.completions.create(
+                    messages=[{"role": "user", "content": "Hi"}],
+                )
+
+    def test_no_session_id_error(self):
+        """Missing sessionId in session/new response is caught."""
+        responses = [
+            {"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": 1}},
+            {"jsonrpc": "2.0", "id": 2, "result": {}},  # no sessionId
+        ]
+        with mock.patch("subprocess.Popen", return_value=self._make_mock_process(responses)):
+            client = ACPClient(agent_name="gemini")
+            with pytest.raises(RuntimeError, match="did not return a sessionId"):
+                client.chat.completions.create(
+                    messages=[{"role": "user", "content": "Hi"}],
+                )
+
+    def test_fs_read_callback(self):
+        """Agent requesting fs/read_text_file gets file content back."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            test_file = Path(tmpdir) / "hello.txt"
+            test_file.write_text("file contents here")
+
+            responses = [
+                {"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": 1}},
+                {"jsonrpc": "2.0", "id": 2, "result": {"sessionId": "s1"}},
+                # Agent requests a file read
+                {
+                    "jsonrpc": "2.0",
+                    "id": 100,
+                    "method": "fs/read_text_file",
+                    "params": {"path": str(test_file)},
+                },
+                # Then sends a text chunk and completes
+                {
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {"text": "got it"},
+                        }
+                    },
+                },
+                {"jsonrpc": "2.0", "id": 3, "result": {"stopReason": "completed"}},
+            ]
+
+            proc = self._make_mock_process(responses)
+            with mock.patch("subprocess.Popen", return_value=proc):
+                client = ACPClient(agent_name="gemini", acp_cwd=tmpdir)
+                result = client.chat.completions.create(
+                    messages=[{"role": "user", "content": "Read that file"}],
+                )
+                assert result.choices[0].message.content == "got it"
+
+                # Verify the response was written back to stdin
+                written = [json.loads(line) for line in proc._written if line.strip()]
+                read_responses = [
+                    w for w in written
+                    if w.get("id") == 100 and "result" in w
+                ]
+                assert len(read_responses) == 1
+                assert read_responses[0]["result"]["content"] == "file contents here"
+
+    def test_fs_read_path_traversal_blocked(self):
+        """File read outside cwd is rejected."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            responses = [
+                {"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": 1}},
+                {"jsonrpc": "2.0", "id": 2, "result": {"sessionId": "s1"}},
+                {
+                    "jsonrpc": "2.0",
+                    "id": 100,
+                    "method": "fs/read_text_file",
+                    "params": {"path": "/etc/passwd"},
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {"text": "ok"},
+                        }
+                    },
+                },
+                {"jsonrpc": "2.0", "id": 3, "result": {"stopReason": "completed"}},
+            ]
+
+            proc = self._make_mock_process(responses)
+            with mock.patch("subprocess.Popen", return_value=proc):
+                client = ACPClient(agent_name="gemini", acp_cwd=tmpdir)
+                client.chat.completions.create(
+                    messages=[{"role": "user", "content": "read /etc/passwd"}],
+                )
+                # Verify the error response was sent
+                written = [json.loads(line) for line in proc._written if line.strip()]
+                error_responses = [
+                    w for w in written
+                    if w.get("id") == 100 and "error" in w
+                ]
+                assert len(error_responses) == 1
+                assert "outside" in error_responses[0]["error"]["message"]
+
+    def test_permission_request_auto_allowed(self):
+        """Permission requests are auto-allowed with allow_once."""
+        responses = [
+            {"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": 1}},
+            {"jsonrpc": "2.0", "id": 2, "result": {"sessionId": "s1"}},
+            {
+                "jsonrpc": "2.0",
+                "id": 200,
+                "method": "session/request_permission",
+                "params": {"permission": "write_file"},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"text": "done"},
+                    }
+                },
+            },
+            {"jsonrpc": "2.0", "id": 3, "result": {"stopReason": "completed"}},
+        ]
+
+        proc = self._make_mock_process(responses)
+        with mock.patch("subprocess.Popen", return_value=proc):
+            client = ACPClient(agent_name="gemini")
+            result = client.chat.completions.create(
+                messages=[{"role": "user", "content": "Do something"}],
+            )
+            assert result.choices[0].message.content == "done"
+
+            written = [json.loads(line) for line in proc._written if line.strip()]
+            perm_responses = [w for w in written if w.get("id") == 200]
+            assert len(perm_responses) == 1
+            assert perm_responses[0]["result"]["outcome"]["outcome"] == "allow_once"
+
+
+# ---------------------------------------------------------------------------
+# Path security
+# ---------------------------------------------------------------------------
+
+class TestPathSecurity:
+    def test_absolute_within_cwd(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            target = Path(tmpdir) / "sub" / "file.txt"
+            result = _ensure_path_within_cwd(str(target), tmpdir)
+            assert result == target.resolve()
+
+    def test_relative_path_rejected(self):
+        with pytest.raises(PermissionError, match="must be absolute"):
+            _ensure_path_within_cwd("relative/path.txt", "/tmp")
+
+    def test_traversal_rejected(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with pytest.raises(PermissionError, match="outside"):
+                _ensure_path_within_cwd("/etc/passwd", tmpdir)
+
+    def test_symlink_traversal_rejected(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            link = Path(tmpdir) / "escape"
+            try:
+                link.symlink_to("/etc")
+            except OSError:
+                pytest.skip("Cannot create symlinks")
+            with pytest.raises(PermissionError, match="outside"):
+                _ensure_path_within_cwd(str(link / "passwd"), tmpdir)
+
+
+# ---------------------------------------------------------------------------
+# Provider overlay wiring
+# ---------------------------------------------------------------------------
+
+class TestProviderOverlays:
+    def test_acp_providers_registered(self):
+        from hermes_cli.providers import HERMES_OVERLAYS
+        expected_agents = [
+            "claude-acp", "codex-acp", "gemini-acp", "cursor-acp",
+            "kiro-acp", "kilocode-acp", "opencode-acp", "kimi-acp",
+            "qwen-acp", "cline-acp", "amp-acp", "droid-acp", "iflow-acp",
+            "copilot-acp",
+        ]
+        for provider_id in expected_agents:
+            assert provider_id in HERMES_OVERLAYS, f"Missing overlay: {provider_id}"
+            overlay = HERMES_OVERLAYS[provider_id]
+            assert overlay.auth_type == "external_process"
+            agent_name = provider_id.removesuffix("-acp")
+            assert overlay.base_url_override == f"acp://{agent_name}"
+
+    def test_agent_name_derivation_from_provider(self):
+        """Verify that provider-id → agent-name derivation works for routing."""
+        from agent.acp_client import extract_agent_from_url
+        from hermes_cli.providers import HERMES_OVERLAYS
+
+        for provider_id in ["claude-acp", "codex-acp", "gemini-acp"]:
+            overlay = HERMES_OVERLAYS[provider_id]
+            agent = extract_agent_from_url(overlay.base_url_override)
+            assert agent == provider_id.removesuffix("-acp")
+
+
+# ---------------------------------------------------------------------------
+# JSON-RPC helpers
+# ---------------------------------------------------------------------------
+
+class TestJsonRpcHelpers:
+    def test_error_format(self):
+        err = _jsonrpc_error(42, -32601, "Method not found")
+        assert err["jsonrpc"] == "2.0"
+        assert err["id"] == 42
+        assert err["error"]["code"] == -32601
+        assert err["error"]["message"] == "Method not found"
