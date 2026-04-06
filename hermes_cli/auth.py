@@ -454,6 +454,87 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         api_key_env_vars=("AZURE_FOUNDRY_API_KEY",),
         base_url_env_var="AZURE_FOUNDRY_BASE_URL",
     ),
+    # -- ACP agent providers (Agent Client Protocol) -------------------------
+    # Each spawns an external coding agent via ACP. Auth is handled by the
+    # agent's own adapter, with env var bridging in acp_agent_registry.py.
+    "claude-acp": ProviderConfig(
+        id="claude-acp",
+        name="Claude (ACP)",
+        auth_type="external_process",
+        inference_base_url="acp://claude",
+    ),
+    "codex-acp": ProviderConfig(
+        id="codex-acp",
+        name="Codex CLI (ACP)",
+        auth_type="external_process",
+        inference_base_url="acp://codex",
+    ),
+    "gemini-acp": ProviderConfig(
+        id="gemini-acp",
+        name="Gemini CLI (ACP)",
+        auth_type="external_process",
+        inference_base_url="acp://gemini",
+    ),
+    "cursor-acp": ProviderConfig(
+        id="cursor-acp",
+        name="Cursor (ACP)",
+        auth_type="external_process",
+        inference_base_url="acp://cursor",
+    ),
+    "kiro-acp": ProviderConfig(
+        id="kiro-acp",
+        name="Kiro (ACP)",
+        auth_type="external_process",
+        inference_base_url="acp://kiro",
+    ),
+    "kilocode-acp": ProviderConfig(
+        id="kilocode-acp",
+        name="KiloCode (ACP)",
+        auth_type="external_process",
+        inference_base_url="acp://kilocode",
+    ),
+    "opencode-acp": ProviderConfig(
+        id="opencode-acp",
+        name="OpenCode (ACP)",
+        auth_type="external_process",
+        inference_base_url="acp://opencode",
+    ),
+    "kimi-acp": ProviderConfig(
+        id="kimi-acp",
+        name="Kimi (ACP)",
+        auth_type="external_process",
+        inference_base_url="acp://kimi",
+    ),
+    "qwen-acp": ProviderConfig(
+        id="qwen-acp",
+        name="Qwen (ACP)",
+        auth_type="external_process",
+        inference_base_url="acp://qwen",
+    ),
+    "cline-acp": ProviderConfig(
+        id="cline-acp",
+        name="Cline (ACP)",
+        auth_type="external_process",
+        inference_base_url="acp://cline",
+    ),
+    "amp-acp": ProviderConfig(
+        id="amp-acp",
+        name="Amp (ACP)",
+        auth_type="external_process",
+        inference_base_url="acp://amp",
+    ),
+    "droid-acp": ProviderConfig(
+        id="droid-acp",
+        name="Droid (ACP)",
+        auth_type="external_process",
+        inference_base_url="acp://droid",
+    ),
+    "iflow-acp": ProviderConfig(
+        id="iflow-acp",
+        name="iFlow (ACP)",
+        auth_type="external_process",
+        inference_base_url="acp://iflow",
+    ),
 }
 
 # Auto-extend PROVIDER_REGISTRY with any api-key provider registered in
