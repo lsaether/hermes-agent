@@ -54,7 +54,10 @@ ACP_AGENT_REGISTRY: Dict[str, ACPAgentEntry] = {
     "claude": ACPAgentEntry(
         command="npx -y @agentclientprotocol/claude-agent-acp@0.25.0",
         auth_env=(
-            ("ANTHROPIC_API_KEY", ("ANTHROPIC_API_KEY", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")),
+            # API key (sk-ant-api03-...) → X-Api-Key header
+            ("ANTHROPIC_API_KEY", ("ANTHROPIC_API_KEY",)),
+            # OAuth token (sk-ant-oat01-...) → Authorization: Bearer header
+            ("ANTHROPIC_AUTH_TOKEN", ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")),
         ),
     ),
     "codex": ACPAgentEntry(

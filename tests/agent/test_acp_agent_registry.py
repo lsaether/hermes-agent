@@ -87,33 +87,49 @@ class TestListAgents:
 
 
 class TestResolveAgentEnv:
-    def test_claude_bridges_anthropic_token(self):
-        """ANTHROPIC_TOKEN is bridged to ANTHROPIC_API_KEY for Claude."""
+    def test_claude_bridges_anthropic_token_to_auth_token(self):
+        """ANTHROPIC_TOKEN is bridged to ANTHROPIC_AUTH_TOKEN (Bearer header)."""
         with mock.patch.dict(os.environ, {
             "ANTHROPIC_API_KEY": "",
-            "ANTHROPIC_TOKEN": "sk-ant-test-token",
+            "ANTHROPIC_AUTH_TOKEN": "",
+            "ANTHROPIC_TOKEN": "sk-ant-oat01-test",
         }):
             env = resolve_agent_env("claude")
-            assert env.get("ANTHROPIC_API_KEY") == "sk-ant-test-token"
+            assert env.get("ANTHROPIC_AUTH_TOKEN") == "sk-ant-oat01-test"
+            assert "ANTHROPIC_API_KEY" not in env
 
     def test_claude_skips_if_api_key_set(self):
         """If ANTHROPIC_API_KEY is already set, don't override it."""
         with mock.patch.dict(os.environ, {
             "ANTHROPIC_API_KEY": "sk-existing",
+            "ANTHROPIC_AUTH_TOKEN": "",
             "ANTHROPIC_TOKEN": "sk-fallback",
         }):
             env = resolve_agent_env("claude")
             assert "ANTHROPIC_API_KEY" not in env  # not overridden
+            # But OAuth token still bridges
+            assert env.get("ANTHROPIC_AUTH_TOKEN") == "sk-fallback"
 
     def test_claude_bridges_oauth_token(self):
-        """CLAUDE_CODE_OAUTH_TOKEN is used as last resort."""
+        """CLAUDE_CODE_OAUTH_TOKEN is used as last resort for Bearer auth."""
         with mock.patch.dict(os.environ, {
             "ANTHROPIC_API_KEY": "",
+            "ANTHROPIC_AUTH_TOKEN": "",
             "ANTHROPIC_TOKEN": "",
             "CLAUDE_CODE_OAUTH_TOKEN": "oauth-token-123",
         }):
             env = resolve_agent_env("claude")
-            assert env.get("ANTHROPIC_API_KEY") == "oauth-token-123"
+            assert env.get("ANTHROPIC_AUTH_TOKEN") == "oauth-token-123"
+
+    def test_claude_skips_if_auth_token_set(self):
+        """If ANTHROPIC_AUTH_TOKEN is already set, don't override it."""
+        with mock.patch.dict(os.environ, {
+            "ANTHROPIC_API_KEY": "",
+            "ANTHROPIC_AUTH_TOKEN": "already-set",
+            "ANTHROPIC_TOKEN": "fallback",
+        }):
+            env = resolve_agent_env("claude")
+            assert "ANTHROPIC_AUTH_TOKEN" not in env
 
     def test_codex_bridges_openai_key(self):
         """Codex auth env is resolved."""
