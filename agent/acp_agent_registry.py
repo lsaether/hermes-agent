@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 # agent on stdin/stdout.  Entries using ``npx -y`` auto-install on first run.
 
 ACP_AGENT_REGISTRY: Dict[str, str] = {
-    "claude": "npx -y @agentclientprotocol/claude-agent-acp@0.21.0",
+    "claude": "npx -y @agentclientprotocol/claude-agent-acp@0.25.0",
     "codex": "npx -y @zed-industries/codex-acp@0.9.5",
     "gemini": "gemini --acp",
     "copilot": "copilot --acp --stdio",

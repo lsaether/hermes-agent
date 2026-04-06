@@ -17,7 +17,7 @@ class TestResolveAgentCommand:
     def test_builtin_claude(self):
         cmd = resolve_agent_command("claude")
         assert cmd is not None
-        assert "claude-agent-acp" in cmd
+        assert "claude-agent-acp@0.25.0" in cmd
 
     def test_builtin_codex(self):
         cmd = resolve_agent_command("codex")

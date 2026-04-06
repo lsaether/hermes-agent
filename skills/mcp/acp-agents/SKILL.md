@@ -20,7 +20,7 @@ This means you get the full capabilities of these agents — their tool use, fil
 
 | Provider ID | Agent | ACP Adapter |
 |-------------|-------|-------------|
-| `claude-acp` | Claude Code | `@agentclientprotocol/claude-agent-acp` |
+| `claude-acp` | Claude (Agent SDK) | `@agentclientprotocol/claude-agent-acp` (requires `ANTHROPIC_API_KEY`) |
 | `codex-acp` | Codex CLI | `@zed-industries/codex-acp` |
 | `gemini-acp` | Gemini CLI | `gemini --acp` |
 | `copilot-acp` | GitHub Copilot | `copilot --acp --stdio` |
@@ -58,18 +58,20 @@ To switch back to a regular API provider:
 /model opus --provider anthropic
 ```
 
-## Prerequisites
+## Prerequisites and Authentication
 
-Each ACP agent must be installed on the machine running Hermes:
+Each ACP agent has its own auth requirements. **ACP adapters use API keys, not CLI subscription/OAuth tokens.**
 
-- **Claude Code**: `npm install -g @anthropic-ai/claude-code` (requires Anthropic auth)
-- **Codex CLI**: `npm install -g @openai/codex` (requires OpenAI auth)
-- **Gemini CLI**: `npm install -g @google/gemini-cli` (requires Google auth)
-- **Copilot**: `npm install -g @githubnext/github-copilot-cli` (requires GitHub auth)
+| Agent | Auth Required | How to Set |
+|-------|--------------|------------|
+| **Claude** | `ANTHROPIC_API_KEY` (paid API key) | [console.anthropic.com](https://console.anthropic.com) |
+| **Codex** | OpenAI API key or ChatGPT subscription | `codex auth` |
+| **Gemini** | Google Cloud API key or `gcloud auth` | `gemini auth login` |
+| **Copilot** | GitHub Copilot subscription | `copilot auth` |
 
-Agents distributed via npx (Claude, Codex, KiloCode, OpenCode, Cline) are auto-installed on first use.
+**Important:** The Claude ACP adapter uses the Anthropic API directly via the Claude Agent SDK. It does **not** use Claude Code CLI's OAuth tokens (Pro/Max subscription). You need a separate API key from the Anthropic console. This is an Anthropic policy — OAuth auth is restricted to Claude Code and claude.ai only.
 
-Node.js is required for npx-based agents. Agents like Gemini, Cursor, Copilot, Kiro, Kimi, and Qwen must be installed globally.
+Agents distributed via npx (Claude, Codex, KiloCode, OpenCode, Cline) are auto-installed on first use. Node.js is required for npx-based agents. Agents like Gemini, Cursor, Copilot, Kiro, Kimi, and Qwen must be installed globally.
 
 ## Custom Agent Commands
 
