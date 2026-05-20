@@ -190,20 +190,49 @@ export function usePeerMessageListener({ appendMessage, lastUserMsgRef, sys }: P
 
               if (kind === 'user_message_chunk') {
                 if (!text) return
+                // Echo detection: the patch's _format_messages_as_prompt
+                // bundles the whole conversation transcript into one big
+                // text block before calling session/prompt. So when the
+                // bridge fans our own outgoing prompt back as a
+                // user_message_chunk, the text is NOT just our last input —
+                // it's a multi-line bundle that ends with our latest input
+                // (typically prefixed by "User:\n"). Match by suffix to
+                // catch both shapes.
                 const lru = recentSelfMessagesRef.current
-                const selfIdx = lru.lastIndexOf(text)
-                if (selfIdx >= 0) {
-                  lru.splice(selfIdx, 1) // consume the dedup token
+                let matchedIdx = -1
+                for (let i = lru.length - 1; i >= 0; i--) {
+                  const own = lru[i]
+                  if (!own) continue
+                  if (
+                    text === own ||
+                    text.endsWith(own) ||
+                    text.endsWith(`User:\n${own}`) ||
+                    text.endsWith(`User: ${own}`)
+                  ) {
+                    matchedIdx = i
+                    break
+                  }
+                }
+                if (matchedIdx >= 0) {
+                  lru.splice(matchedIdx, 1) // consume the dedup token
                   return
                 }
                 // Flush any in-flight peer agent buffer first so events
                 // appear in the order they happened.
                 flushPeerAgentBuf()
                 // Render as `role: 'system'` so the Ink TUI gives it the
-                // muted single-line treatment (· glyph, no bubble).
+                // muted single-line treatment (· glyph, no bubble). If the
+                // peer's text is also a bundled transcript (unlikely but
+                // possible if another Hermes-TUI peer is connected), trim
+                // to the last User:\n segment so we show only their latest.
+                let display = text
+                const lastUserIdx = display.lastIndexOf('User:\n')
+                if (lastUserIdx >= 0) {
+                  display = display.slice(lastUserIdx + 'User:\n'.length).trim()
+                }
                 appendMessage({
                   role: 'system',
-                  text: `🌐 peer: ${text}`
+                  text: `🌐 peer: ${display}`
                 } as Msg)
               } else if (kind === 'agent_message_chunk') {
                 // Append to the peer-agent buffer and schedule a debounced
