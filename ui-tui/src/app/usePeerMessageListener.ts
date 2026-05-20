@@ -45,6 +45,7 @@ interface PeerTurnAccumulator {
   thinking: string
   response: string
   tools: string[]
+  toolOutputChars: number
   active: boolean
 }
 
@@ -53,6 +54,7 @@ const emptyPeerTurn = (): PeerTurnAccumulator => ({
   thinking: '',
   response: '',
   tools: [],
+  toolOutputChars: 0,
   active: false
 })
 
@@ -108,19 +110,22 @@ export function usePeerMessageListener({ appendMessage, lastUserMsgRef, sys }: P
       if (!turn.active) return
       peerTurnRef.current = emptyPeerTurn()
 
-      // 1. Peer prompt — emitted as a system line with a peer marker (the
-      //    Ink TUI's role:'user' would use the local user glyph and be
-      //    visually indistinguishable from your own input).
+      // 1. Peer prompt — render as role:'user' so we get the native `›`
+      //    prompt glyph treatment that local user inputs use. The leading
+      //    `🌐` marker in the text distinguishes peer prompts from local
+      //    ones; the rest of the body reads like any other user line.
       if (turn.prompt) {
         appendMessage({
-          role: 'system',
-          text: `🌐 peer: ${turn.prompt}`
+          role: 'user',
+          text: `🌐 ${turn.prompt}`
         } as Msg)
       }
 
-      // 2. Native-style trail Msg with thinking + tool list. The Ink TUI's
-      //    ToolTrail component renders this as the collapsible `└─ ▾
-      //    Thinking ~N tokens` / `└─ ▾ Tool calls (N)` tree.
+      // 2. Native-style trail Msg with thinking + tool list + token total.
+      //    The Ink TUI's ToolTrail component renders this as the
+      //    collapsible `└─ ▾ Thinking ~N tokens` / `└─ ▾ Tool calls (N)` /
+      //    `└─ Σ ~M total` tree. toolTokens is estimated from cumulative
+      //    tool output character counts (same heuristic turnController uses).
       const thinkingText = turn.thinking.trim()
       if (thinkingText || turn.tools.length > 0) {
         const trail: Partial<Msg> & { kind: 'trail'; role: 'system'; text: string } = {
@@ -135,15 +140,20 @@ export function usePeerMessageListener({ appendMessage, lastUserMsgRef, sys }: P
         if (turn.tools.length) {
           trail.tools = turn.tools
         }
+        if (turn.toolOutputChars > 0) {
+          trail.toolTokens = (turn.toolOutputChars + 3) >> 2
+        }
         appendMessage(trail as Msg)
       }
 
-      // 3. Final agent response — dim system line with peer marker.
+      // 3. Final agent response — dim system line, mirroring the native
+      //    `· OK` look. Keep a small leading peer marker so the line still
+      //    reads as peer activity even without the prompt line above.
       const responseText = turn.response.trim()
       if (responseText) {
         appendMessage({
           role: 'system',
-          text: `🌐    ${responseText}`
+          text: `🌐 ${responseText}`
         } as Msg)
       }
     }
@@ -349,12 +359,20 @@ export function usePeerMessageListener({ appendMessage, lastUserMsgRef, sys }: P
                 peerTurnRef.current.tools.push(String(name))
                 peerTurnRef.current.active = true
                 schedulePeerTurnFlush()
+              } else if (kind === 'tool_call_update') {
+                // Accumulate tool output character count so the trail can
+                // show a `Σ ~N total` token line, matching native render.
+                const outputText =
+                  content && typeof content === 'object'
+                    ? String(content.text ?? '')
+                    : ''
+                if (outputText) {
+                  peerTurnRef.current.toolOutputChars += outputText.length
+                  peerTurnRef.current.active = true
+                  schedulePeerTurnFlush()
+                }
               }
-              // tool_call_update: native renderer doesn't show per-update
-              // output in the tree (it counts tool tokens via a side
-              // channel). Skip for now — the trail shows tool NAMES, which
-              // is the level of detail the native UI uses.
-              // plan kind: also hidden in v0.
+              // plan kind: still hidden in v0.
             })
 
             ws.addEventListener('close', () => resolve())
