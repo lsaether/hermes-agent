@@ -406,7 +406,7 @@ class ACPClient:
                     f"ACP agent '{self._agent_name}' failed (exit {proc.returncode}): {stderr_text}"
                 )
 
-        response = "".join(text_parts).strip()
+        response = "\n".join(text_parts).strip()
         if not response:
             # Fallback: try to get any stdout that wasn't NDJSON
             stderr_text = "\n".join(stderr_tail).strip()
