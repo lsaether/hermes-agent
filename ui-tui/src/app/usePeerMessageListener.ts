@@ -28,6 +28,12 @@ const HANDSHAKE_TIMEOUT_MS = 10_000
 const RECONNECT_DELAY_MS = 2_000
 
 const PEER_AGENT_FLUSH_MS = 600
+// When the user submits in this TUI, suppress all bridge fan-out events for
+// this many ms of quiet, so the agent's tool calls / responses for OUR turn
+// don't render as peer activity. The bridge can't tell us "this event
+// belongs to that subscriber's turn" — best we can do is mute around our
+// own submission window.
+const OWN_TURN_IDLE_MS = 3000
 
 export function usePeerMessageListener({ appendMessage, lastUserMsgRef, sys }: Params): void {
   const stoppedRef = useRef(false)
@@ -40,6 +46,12 @@ export function usePeerMessageListener({ appendMessage, lastUserMsgRef, sys }: P
   // of one system line per token.
   const peerAgentBufRef = useRef<string>('')
   const peerAgentTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Own-turn muting: set when we see a fresh local submission, cleared after
+  // OWN_TURN_IDLE_MS of bridge silence. All session/update events arriving
+  // during this window are dropped — they're either our prompt's echo or
+  // the agent's response/tool activity for OUR turn.
+  const ownTurnActiveRef = useRef(false)
+  const ownTurnIdleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     const bridgeUrl = (process.env.HERMES_BRIDGE_URL ?? '').trim()
@@ -47,10 +59,29 @@ export function usePeerMessageListener({ appendMessage, lastUserMsgRef, sys }: P
 
     stoppedRef.current = false
 
+    const refreshOwnTurnIdle = () => {
+      if (ownTurnIdleTimerRef.current) clearTimeout(ownTurnIdleTimerRef.current)
+      ownTurnIdleTimerRef.current = setTimeout(() => {
+        ownTurnActiveRef.current = false
+        ownTurnIdleTimerRef.current = null
+      }, OWN_TURN_IDLE_MS)
+    }
+    const enterOwnTurn = () => {
+      ownTurnActiveRef.current = true
+      // Discard any peer-agent buffer that was accumulating — it's almost
+      // certainly from earlier and isn't relevant to render now.
+      peerAgentBufRef.current = ''
+      if (peerAgentTimerRef.current) {
+        clearTimeout(peerAgentTimerRef.current)
+        peerAgentTimerRef.current = null
+      }
+      refreshOwnTurnIdle()
+    }
+
     // Keep recentSelfMessagesRef synced with lastUserMsgRef on every render
-    // tick by polling. (lastUserMsg is updated synchronously when the user
-    // submits — we just need to capture the value before the bridge echo
-    // arrives, which is usually within ~50ms.)
+    // tick by polling. When a new submission appears we ALSO enter own-turn
+    // mute, so subsequent agent activity (tool calls, response chunks) gets
+    // silenced as our own turn.
     const syncInterval = setInterval(() => {
       const last = lastUserMsgRef.current?.trim() ?? ''
       if (!last) return
@@ -58,6 +89,7 @@ export function usePeerMessageListener({ appendMessage, lastUserMsgRef, sys }: P
       if (lru[lru.length - 1] !== last) {
         lru.push(last)
         if (lru.length > 32) lru.shift()
+        enterOwnTurn()
       }
     }, 100)
 
@@ -161,6 +193,18 @@ export function usePeerMessageListener({ appendMessage, lastUserMsgRef, sys }: P
               }
 
               if (parsed.method !== 'session/update') return
+
+              // Own-turn mute: if a local submission was just made, every
+              // event flowing through the bridge during the silence window
+              // is almost certainly OUR turn's activity (the bundled-prompt
+              // echo, the agent's tool calls, the response chunks). Drop
+              // them all; the local TUI is already rendering them natively
+              // through its own gateway client.
+              if (ownTurnActiveRef.current) {
+                refreshOwnTurnIdle()
+                return
+              }
+
               const update = parsed.params?.update ?? {}
               const kind: string = update.sessionUpdate ?? ''
               const content = update.content
@@ -304,6 +348,10 @@ export function usePeerMessageListener({ appendMessage, lastUserMsgRef, sys }: P
       if (peerAgentTimerRef.current) {
         clearTimeout(peerAgentTimerRef.current)
         peerAgentTimerRef.current = null
+      }
+      if (ownTurnIdleTimerRef.current) {
+        clearTimeout(ownTurnIdleTimerRef.current)
+        ownTurnIdleTimerRef.current = null
       }
       // Drop any half-buffered text on unmount; no need to flush since the
       // app is going down.
