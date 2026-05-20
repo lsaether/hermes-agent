@@ -48,34 +48,34 @@ class ACPAgentEntry:
 
 ACP_AGENT_REGISTRY: Dict[str, ACPAgentEntry] = {
     "claude": ACPAgentEntry(
-        command="npx -y acpx claude",
+        command="npx -y acpx --format json claude",
         auth_env=(
             ("ANTHROPIC_API_KEY", ("ANTHROPIC_API_KEY",)),
             ("ANTHROPIC_AUTH_TOKEN", ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")),
         ),
     ),
     "codex": ACPAgentEntry(
-        command="npx -y acpx codex",
+        command="npx -y acpx --format json codex",
         auth_env=(
             ("OPENAI_API_KEY", ("OPENAI_API_KEY",)),
         ),
     ),
     "gemini": ACPAgentEntry(
-        command="npx -y acpx gemini",
+        command="npx -y acpx --format json gemini",
     ),
     "copilot": ACPAgentEntry(
-        command="npx -y acpx copilot",
+        command="npx -y acpx --format json copilot",
     ),
-    "cursor": ACPAgentEntry(command="npx -y acpx cursor"),
-    "kiro": ACPAgentEntry(command="npx -y acpx kiro"),
-    "kilocode": ACPAgentEntry(command="npx -y acpx kilocode"),
-    "opencode": ACPAgentEntry(command="npx -y acpx opencode"),
-    "kimi": ACPAgentEntry(command="npx -y acpx kimi"),
-    "qwen": ACPAgentEntry(command="npx -y acpx qwen"),
-    "droid": ACPAgentEntry(command="npx -y acpx droid"),
-    "iflow": ACPAgentEntry(command="npx -y acpx iflow"),
-    "cline": ACPAgentEntry(command="npx -y acpx cline"),
-    "amp": ACPAgentEntry(command="npx -y acpx amp"),
+    "cursor": ACPAgentEntry(command="npx -y acpx --format json cursor"),
+    "kiro": ACPAgentEntry(command="npx -y acpx --format json kiro"),
+    "kilocode": ACPAgentEntry(command="npx -y acpx --format json kilocode"),
+    "opencode": ACPAgentEntry(command="npx -y acpx --format json opencode"),
+    "kimi": ACPAgentEntry(command="npx -y acpx --format json kimi"),
+    "qwen": ACPAgentEntry(command="npx -y acpx --format json qwen"),
+    "droid": ACPAgentEntry(command="npx -y acpx --format json droid"),
+    "iflow": ACPAgentEntry(command="npx -y acpx --format json iflow"),
+    "cline": ACPAgentEntry(command="npx -y acpx --format json cline"),
+    "amp": ACPAgentEntry(command="npx -y acpx --format json amp"),
 }
 
 
