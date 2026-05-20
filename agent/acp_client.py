@@ -341,34 +341,48 @@ class ACPClient:
         err_thread = threading.Thread(target=_stderr_reader, daemon=True)
         err_thread.start()
 
-        # Collect all stdout — acpx streams NDJSON events
+        # Collect all stdout. Older acpx emitted NDJSON; current acpx emits
+        # human-readable text (lines starting with [client], [done], plus the
+        # plain-text response body). Handle both formats.
         text_parts: list[str] = []
         try:
             if proc.stdin:
                 proc.stdin.close()
 
             for line in proc.stdout or []:
-                line = line.strip()
-                if not line:
+                raw_line = line.rstrip("\n")
+                stripped = raw_line.strip()
+                if not stripped:
                     continue
+
+                # Try NDJSON path first (older acpx).
                 try:
-                    event = json.loads(line)
+                    event = json.loads(stripped)
                 except (json.JSONDecodeError, ValueError):
+                    event = None
+
+                if isinstance(event, dict):
+                    if event.get("method") == "session/update":
+                        params = event.get("params") or {}
+                        update = params.get("update") or {}
+                        kind = str(update.get("sessionUpdate") or "")
+                        content = update.get("content") or {}
+                        chunk = (
+                            str(content.get("text") or "")
+                            if isinstance(content, dict)
+                            else ""
+                        )
+                        if kind == "agent_message_chunk" and chunk:
+                            text_parts.append(chunk)
+                    if "text" in event:
+                        text_parts.append(str(event["text"]))
                     continue
 
-                # Extract text from ACP session update events
-                if event.get("method") == "session/update":
-                    params = event.get("params") or {}
-                    update = params.get("update") or {}
-                    kind = str(update.get("sessionUpdate") or "")
-                    content = update.get("content") or {}
-                    chunk = str(content.get("text") or "") if isinstance(content, dict) else ""
-                    if kind == "agent_message_chunk" and chunk:
-                        text_parts.append(chunk)
-
-                # Also handle plain text output from acpx exec
-                if isinstance(event, dict) and "text" in event:
-                    text_parts.append(str(event["text"]))
+                # Human-text path (current acpx). Skip status markers; treat
+                # everything else as part of the response body.
+                if stripped.startswith("[client]") or stripped.startswith("[done]"):
+                    continue
+                text_parts.append(raw_line)
 
             proc.wait(timeout=timeout_seconds)
 
