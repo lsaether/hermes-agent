@@ -30,6 +30,62 @@ ACP_MARKER_PREFIX = "acp://"
 _DEFAULT_TIMEOUT_SECONDS = 900.0
 
 
+def _stream_chat_completion(response_text: str, usage: Any, model: str | None):
+    """Yield OpenAI-style streaming chunks for a single full response.
+
+    Hermes' chat-completion consumer iterates the response when ``stream=True``;
+    we don't have token-level streaming from acpx exec, so we emit:
+
+      1. Opening chunk: delta.role="assistant", no content.
+      2. Content chunk: delta.content=<full response>.
+      3. Final chunk: empty delta, finish_reason="stop", usage attached.
+    """
+    model_id = model or "acp"
+    chunk_id = f"acp-stream-{id(response_text)}"
+    # Opening chunk
+    yield SimpleNamespace(
+        id=chunk_id,
+        model=model_id,
+        object="chat.completion.chunk",
+        choices=[
+            SimpleNamespace(
+                index=0,
+                delta=SimpleNamespace(role="assistant", content=None, tool_calls=None),
+                finish_reason=None,
+            )
+        ],
+        usage=None,
+    )
+    # Content chunk
+    yield SimpleNamespace(
+        id=chunk_id,
+        model=model_id,
+        object="chat.completion.chunk",
+        choices=[
+            SimpleNamespace(
+                index=0,
+                delta=SimpleNamespace(content=response_text, tool_calls=None),
+                finish_reason=None,
+            )
+        ],
+        usage=None,
+    )
+    # Final chunk
+    yield SimpleNamespace(
+        id=chunk_id,
+        model=model_id,
+        object="chat.completion.chunk",
+        choices=[
+            SimpleNamespace(
+                index=0,
+                delta=SimpleNamespace(content=None, tool_calls=None),
+                finish_reason="stop",
+            )
+        ],
+        usage=usage,
+    )
+
+
 def _timeout_to_seconds(timeout: Any) -> float:
     """Coerce a timeout value (float, int, httpx.Timeout, or None) to seconds.
 
@@ -206,6 +262,7 @@ class ACPClient:
         model: str | None = None,
         messages: list[dict[str, Any]] | None = None,
         timeout: Any = None,
+        stream: bool = False,
         **_: Any,
     ) -> Any:
         prompt_text = _format_messages_as_prompt(
@@ -220,6 +277,10 @@ class ACPClient:
             prompt_tokens=0, completion_tokens=0, total_tokens=0,
             prompt_tokens_details=SimpleNamespace(cached_tokens=0),
         )
+
+        if stream:
+            return _stream_chat_completion(response_text, usage, model)
+
         assistant_message = SimpleNamespace(
             content=response_text,
             tool_calls=[],

@@ -92,6 +92,11 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
     ),
     # -- ACP agent providers (Agent Client Protocol) -------------------------
     # Each spawns the named agent via its official ACP adapter.
+    "hermes-acp": HermesOverlay(
+        transport="openai_chat",
+        auth_type="external_process",
+        base_url_override="acp://hermes",
+    ),
     "claude-acp": HermesOverlay(
         transport="codex_responses",
         auth_type="external_process",
