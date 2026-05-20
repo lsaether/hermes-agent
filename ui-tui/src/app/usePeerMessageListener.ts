@@ -170,27 +170,23 @@ export function usePeerMessageListener({ appendMessage, lastUserMsgRef, sys }: P
                   lru.splice(selfIdx, 1) // consume the dedup token
                   return
                 }
+                // Render as `role: 'system'` so the Ink TUI gives it the
+                // muted single-line treatment (· glyph, no bubble), not the
+                // full user/assistant chat-bubble look. This visually
+                // distinguishes peer activity from local conversation.
                 appendMessage({
-                  role: 'user',
-                  text: `🌐 peer ▶ ${text}`
-                } as Msg)
-              } else if (kind === 'agent_message_chunk') {
-                // Peer's agent turn — render as an assistant message tagged
-                // as peer. We can't distinguish "my turn's agent" from
-                // "peer's turn's agent" reliably here, so v0 always tags;
-                // future work: track active_turn_bridge_id via a side-channel.
-                if (!text) return
-                appendMessage({
-                  role: 'assistant',
-                  text: `🌐 ${text}`
-                } as Msg)
-              } else if (kind === 'tool_call') {
-                const name = update.title ?? update.name ?? 'tool'
-                appendMessage({
-                  role: 'tool',
-                  text: `🌐 🔧 ${name}`
+                  role: 'system',
+                  text: `🌐 peer: ${text}`
                 } as Msg)
               }
+              // agent_message_chunk and tool_call from peer turns are
+              // intentionally dropped in v0 — they'd flood the transcript
+              // with token-by-token streaming every time the agent replies
+              // to a peer's prompt. The peer's own client renders them; you
+              // don't need them in your TUI to know what's happening (the
+              // peer's user_message_chunk + the eventual response when YOU
+              // ask is enough context). Future work: a /peer command to
+              // attach to a peer's turn and stream their agent output.
             })
 
             ws.addEventListener('close', () => resolve())
