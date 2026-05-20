@@ -14,6 +14,7 @@
  * user_message_chunks too) against a small LRU of recently-sent text.
  */
 import { useEffect, useRef } from 'react'
+import { estimateTokensRough } from '../lib/text.js'
 import type { Msg } from '../types.js'
 
 interface Params {
@@ -27,7 +28,11 @@ interface Params {
 const HANDSHAKE_TIMEOUT_MS = 10_000
 const RECONNECT_DELAY_MS = 2_000
 
-const PEER_AGENT_FLUSH_MS = 600
+// Idle window after the last peer event before we flush the accumulated
+// peer turn as a single structured rendering. Long enough that a streaming
+// agent's natural pauses don't cause premature flushes; short enough that
+// completed turns appear promptly.
+const PEER_TURN_IDLE_MS = 1500
 // When the user submits in this TUI, suppress all bridge fan-out events for
 // this many ms of quiet, so the agent's tool calls / responses for OUR turn
 // don't render as peer activity. The bridge can't tell us "this event
@@ -35,17 +40,34 @@ const PEER_AGENT_FLUSH_MS = 600
 // own submission window.
 const OWN_TURN_IDLE_MS = 3000
 
+interface PeerTurnAccumulator {
+  prompt: string
+  thinking: string
+  response: string
+  tools: string[]
+  active: boolean
+}
+
+const emptyPeerTurn = (): PeerTurnAccumulator => ({
+  prompt: '',
+  thinking: '',
+  response: '',
+  tools: [],
+  active: false
+})
+
 export function usePeerMessageListener({ appendMessage, lastUserMsgRef, sys }: Params): void {
   const stoppedRef = useRef(false)
   const wsRef = useRef<WebSocket | null>(null)
   // LRU of texts the user just submitted — when the bridge echoes our prompt
   // back as a user_message_chunk we suppress it.
   const recentSelfMessagesRef = useRef<string[]>([])
-  // Buffer for token-level agent_message_chunk streams; flushed on a debounce
-  // timer so the transcript gets one coalesced line per agent burst instead
-  // of one system line per token.
-  const peerAgentBufRef = useRef<string>('')
-  const peerAgentTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // Accumulator for a single peer turn — collects prompt, thinking, tools,
+  // and final response, then emits a structured native-style rendering
+  // (one role:'user' line + one kind:'trail' tree + one final response line)
+  // on idle, matching what the native turn renderer produces.
+  const peerTurnRef = useRef<PeerTurnAccumulator>(emptyPeerTurn())
+  const peerTurnTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   // Own-turn muting: set when we see a fresh local submission, cleared after
   // OWN_TURN_IDLE_MS of bridge silence. All session/update events arriving
   // during this window are dropped — they're either our prompt's echo or
@@ -68,14 +90,67 @@ export function usePeerMessageListener({ appendMessage, lastUserMsgRef, sys }: P
     }
     const enterOwnTurn = () => {
       ownTurnActiveRef.current = true
-      // Discard any peer-agent buffer that was accumulating — it's almost
-      // certainly from earlier and isn't relevant to render now.
-      peerAgentBufRef.current = ''
-      if (peerAgentTimerRef.current) {
-        clearTimeout(peerAgentTimerRef.current)
-        peerAgentTimerRef.current = null
+      // Discard any in-flight peer turn — almost certainly stale.
+      peerTurnRef.current = emptyPeerTurn()
+      if (peerTurnTimerRef.current) {
+        clearTimeout(peerTurnTimerRef.current)
+        peerTurnTimerRef.current = null
       }
       refreshOwnTurnIdle()
+    }
+
+    const flushPeerTurn = () => {
+      if (peerTurnTimerRef.current) {
+        clearTimeout(peerTurnTimerRef.current)
+        peerTurnTimerRef.current = null
+      }
+      const turn = peerTurnRef.current
+      if (!turn.active) return
+      peerTurnRef.current = emptyPeerTurn()
+
+      // 1. Peer prompt — emitted as a system line with a peer marker (the
+      //    Ink TUI's role:'user' would use the local user glyph and be
+      //    visually indistinguishable from your own input).
+      if (turn.prompt) {
+        appendMessage({
+          role: 'system',
+          text: `🌐 peer: ${turn.prompt}`
+        } as Msg)
+      }
+
+      // 2. Native-style trail Msg with thinking + tool list. The Ink TUI's
+      //    ToolTrail component renders this as the collapsible `└─ ▾
+      //    Thinking ~N tokens` / `└─ ▾ Tool calls (N)` tree.
+      const thinkingText = turn.thinking.trim()
+      if (thinkingText || turn.tools.length > 0) {
+        const trail: Partial<Msg> & { kind: 'trail'; role: 'system'; text: string } = {
+          kind: 'trail',
+          role: 'system',
+          text: ''
+        }
+        if (thinkingText) {
+          trail.thinking = thinkingText
+          trail.thinkingTokens = estimateTokensRough(thinkingText)
+        }
+        if (turn.tools.length) {
+          trail.tools = turn.tools
+        }
+        appendMessage(trail as Msg)
+      }
+
+      // 3. Final agent response — dim system line with peer marker.
+      const responseText = turn.response.trim()
+      if (responseText) {
+        appendMessage({
+          role: 'system',
+          text: `🌐    ${responseText}`
+        } as Msg)
+      }
+    }
+
+    const schedulePeerTurnFlush = () => {
+      if (peerTurnTimerRef.current) clearTimeout(peerTurnTimerRef.current)
+      peerTurnTimerRef.current = setTimeout(flushPeerTurn, PEER_TURN_IDLE_MS)
     }
 
     // Keep recentSelfMessagesRef synced with lastUserMsgRef on every render
@@ -213,35 +288,13 @@ export function usePeerMessageListener({ appendMessage, lastUserMsgRef, sys }: P
                 text = String(content.text ?? '').trim()
               }
 
-              const flushPeerAgentBuf = () => {
-                if (peerAgentTimerRef.current) {
-                  clearTimeout(peerAgentTimerRef.current)
-                  peerAgentTimerRef.current = null
-                }
-                const buffered = peerAgentBufRef.current.trim()
-                peerAgentBufRef.current = ''
-                if (buffered) {
-                  appendMessage({
-                    role: 'system',
-                    text: `🌐   ${buffered}`
-                  } as Msg)
-                }
-              }
-              const schedulePeerAgentFlush = () => {
-                if (peerAgentTimerRef.current) clearTimeout(peerAgentTimerRef.current)
-                peerAgentTimerRef.current = setTimeout(flushPeerAgentBuf, PEER_AGENT_FLUSH_MS)
-              }
-
               if (kind === 'user_message_chunk') {
                 if (!text) return
                 // Echo detection: the patch's _format_messages_as_prompt
-                // bundles the whole conversation transcript into one big
-                // text block before calling session/prompt. So when the
-                // bridge fans our own outgoing prompt back as a
-                // user_message_chunk, the text is NOT just our last input —
-                // it's a multi-line bundle that ends with our latest input
-                // (typically prefixed by "User:\n"). Match by suffix to
-                // catch both shapes.
+                // bundles the whole conversation transcript before calling
+                // session/prompt, so the bridge's echo of our own outgoing
+                // prompt is a multi-line bundle ending with "User:\n<input>".
+                // Match by suffix to catch both shapes.
                 const lru = recentSelfMessagesRef.current
                 let matchedIdx = -1
                 for (let i = lru.length - 1; i >= 0; i--) {
@@ -261,66 +314,47 @@ export function usePeerMessageListener({ appendMessage, lastUserMsgRef, sys }: P
                   lru.splice(matchedIdx, 1) // consume the dedup token
                   return
                 }
-                // Flush any in-flight peer agent buffer first so events
-                // appear in the order they happened.
-                flushPeerAgentBuf()
-                // Render as `role: 'system'` so the Ink TUI gives it the
-                // muted single-line treatment (· glyph, no bubble). If the
-                // peer's text is also a bundled transcript (unlikely but
-                // possible if another Hermes-TUI peer is connected), trim
-                // to the last User:\n segment so we show only their latest.
+                // A new peer turn starts. Flush any previous turn that's
+                // still buffered (e.g. quick back-to-back peer messages
+                // wouldn't otherwise show until the idle timer).
+                flushPeerTurn()
+                // Trim bundled transcripts down to the last User:\n entry
+                // (covers the case where another Hermes-TUI peer also sends
+                // its conversation bundle).
                 let display = text
                 const lastUserIdx = display.lastIndexOf('User:\n')
                 if (lastUserIdx >= 0) {
                   display = display.slice(lastUserIdx + 'User:\n'.length).trim()
                 }
-                appendMessage({
-                  role: 'system',
-                  text: `🌐 peer: ${display}`
-                } as Msg)
-              } else if (kind === 'agent_message_chunk') {
-                // Append to the peer-agent buffer and schedule a debounced
-                // flush. Each token doesn't emit its own system line; we
-                // wait for a quiet window (~600ms) then emit one coalesced
-                // line. Punctuation/newlines naturally pause a stream so
-                // this gives sentence-ish chunks.
-                if (!text) return
-                peerAgentBufRef.current += text
-                schedulePeerAgentFlush()
-              } else if (kind === 'tool_call') {
-                flushPeerAgentBuf()
-                const name = update.title ?? update.name ?? 'tool'
-                const tkind = update.kind
-                const label = tkind && tkind !== name ? `${name} (${tkind})` : String(name)
-                appendMessage({
-                  role: 'system',
-                  text: `🌐 🔧 ${label}`
-                } as Msg)
-              } else if (kind === 'tool_call_update') {
-                const status = update.status
-                const contentText =
-                  content && typeof content === 'object' ? String(content.text ?? '').trim() : ''
-                if (contentText) {
-                  flushPeerAgentBuf()
-                  const snippet =
-                    contentText.length > 120
-                      ? contentText.slice(0, 120) + '…'
-                      : contentText
-                  appendMessage({
-                    role: 'system',
-                    text: `🌐    ${snippet}`
-                  } as Msg)
-                } else if (status && status !== 'in_progress') {
-                  // Status-only update (e.g. completed) — surface briefly.
-                  appendMessage({
-                    role: 'system',
-                    text: `🌐    (${status})`
-                  } as Msg)
+                peerTurnRef.current = {
+                  prompt: display,
+                  thinking: '',
+                  response: '',
+                  tools: [],
+                  active: true
                 }
+                schedulePeerTurnFlush()
+              } else if (kind === 'agent_thought_chunk') {
+                if (!text) return
+                peerTurnRef.current.thinking += text
+                peerTurnRef.current.active = true
+                schedulePeerTurnFlush()
+              } else if (kind === 'agent_message_chunk') {
+                if (!text) return
+                peerTurnRef.current.response += text
+                peerTurnRef.current.active = true
+                schedulePeerTurnFlush()
+              } else if (kind === 'tool_call') {
+                const name = update.title ?? update.name ?? 'tool'
+                peerTurnRef.current.tools.push(String(name))
+                peerTurnRef.current.active = true
+                schedulePeerTurnFlush()
               }
-              // agent_thought_chunk and plan kinds remain hidden in v0 — most
-              // noise/value trade-off lives in the agent_message_chunk +
-              // tool_call paths above. Add explicit cases if you want them.
+              // tool_call_update: native renderer doesn't show per-update
+              // output in the tree (it counts tool tokens via a side
+              // channel). Skip for now — the trail shows tool NAMES, which
+              // is the level of detail the native UI uses.
+              // plan kind: also hidden in v0.
             })
 
             ws.addEventListener('close', () => resolve())
@@ -345,17 +379,16 @@ export function usePeerMessageListener({ appendMessage, lastUserMsgRef, sys }: P
     return () => {
       stoppedRef.current = true
       clearInterval(syncInterval)
-      if (peerAgentTimerRef.current) {
-        clearTimeout(peerAgentTimerRef.current)
-        peerAgentTimerRef.current = null
+      if (peerTurnTimerRef.current) {
+        clearTimeout(peerTurnTimerRef.current)
+        peerTurnTimerRef.current = null
       }
       if (ownTurnIdleTimerRef.current) {
         clearTimeout(ownTurnIdleTimerRef.current)
         ownTurnIdleTimerRef.current = null
       }
-      // Drop any half-buffered text on unmount; no need to flush since the
-      // app is going down.
-      peerAgentBufRef.current = ''
+      // Drop any in-flight peer turn — app is going down.
+      peerTurnRef.current = emptyPeerTurn()
       const ws = wsRef.current
       if (ws && ws.readyState !== ws.CLOSED) {
         try {
