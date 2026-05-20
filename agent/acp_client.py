@@ -341,10 +341,36 @@ class ACPClient:
         err_thread = threading.Thread(target=_stderr_reader, daemon=True)
         err_thread.start()
 
-        # Collect all stdout. Older acpx emitted NDJSON; current acpx emits
-        # human-readable text (lines starting with [client], [done], plus the
-        # plain-text response body). Handle both formats.
-        text_parts: list[str] = []
+        # Collect stdout. With acpx --format json we get NDJSON events; we
+        # build up the response as a sequence of segments where:
+        #   - agent_message_chunk events concatenate WITHOUT separators
+        #     (they're token-level deltas of one message)
+        #   - tool_call / tool_call_update events render as visible blocks
+        #     so the user sees what tools were invoked and what came back
+        # Older acpx human-text output is still handled as a fallback.
+        segments: list[str] = []
+        message_buffer: list[str] = []
+
+        def _flush_message() -> None:
+            if message_buffer:
+                joined = "".join(message_buffer).strip()
+                if joined:
+                    segments.append(joined)
+                message_buffer.clear()
+
+        def _extract_text(content: Any) -> str:
+            if isinstance(content, dict):
+                return str(content.get("text") or "")
+            if isinstance(content, list):
+                parts = []
+                for block in content:
+                    if isinstance(block, dict):
+                        parts.append(str(block.get("text") or ""))
+                return "".join(parts)
+            if isinstance(content, str):
+                return content
+            return ""
+
         try:
             if proc.stdin:
                 proc.stdin.close()
@@ -355,35 +381,55 @@ class ACPClient:
                 if not stripped:
                     continue
 
-                # Try NDJSON path first (older acpx).
                 try:
                     event = json.loads(stripped)
                 except (json.JSONDecodeError, ValueError):
                     event = None
 
                 if isinstance(event, dict):
-                    if event.get("method") == "session/update":
-                        params = event.get("params") or {}
-                        update = params.get("update") or {}
+                    method = event.get("method")
+                    if method == "session/update":
+                        update = (event.get("params") or {}).get("update") or {}
                         kind = str(update.get("sessionUpdate") or "")
-                        content = update.get("content") or {}
-                        chunk = (
-                            str(content.get("text") or "")
-                            if isinstance(content, dict)
-                            else ""
-                        )
-                        if kind == "agent_message_chunk" and chunk:
-                            text_parts.append(chunk)
-                    if "text" in event:
-                        text_parts.append(str(event["text"]))
+
+                        if kind == "agent_message_chunk":
+                            message_buffer.append(_extract_text(update.get("content")))
+                        elif kind == "agent_thought_chunk":
+                            # Hide internal thinking from the rendered response.
+                            pass
+                        elif kind == "tool_call":
+                            _flush_message()
+                            name = update.get("title") or update.get("name") or "tool"
+                            kind_label = update.get("kind") or ""
+                            header = f"🔧 **{name}**"
+                            if kind_label and kind_label != name:
+                                header = f"🔧 **{name}** ({kind_label})"
+                            segments.append(header)
+                        elif kind == "tool_call_update":
+                            _flush_message()
+                            status = update.get("status") or ""
+                            content_text = _extract_text(update.get("content"))
+                            if content_text:
+                                segments.append(f"```\n{content_text}\n```")
+                            elif status:
+                                segments.append(f"_({status})_")
+                        elif kind == "plan":
+                            _flush_message()
+                            plan_text = _extract_text(update.get("content"))
+                            if plan_text:
+                                segments.append(f"📋 **Plan**\n{plan_text}")
+                    elif "text" in event:
+                        # Legacy / older acpx event shape — pass through.
+                        message_buffer.append(str(event["text"]))
                     continue
 
-                # Human-text path (current acpx). Skip status markers; treat
-                # everything else as part of the response body.
+                # Human-text fallback (very old acpx). Skip status markers;
+                # everything else gets treated as part of the message.
                 if stripped.startswith("[client]") or stripped.startswith("[done]"):
                     continue
-                text_parts.append(raw_line)
+                message_buffer.append(raw_line + "\n")
 
+            _flush_message()
             proc.wait(timeout=timeout_seconds)
 
         except subprocess.TimeoutExpired:
@@ -406,9 +452,8 @@ class ACPClient:
                     f"ACP agent '{self._agent_name}' failed (exit {proc.returncode}): {stderr_text}"
                 )
 
-        response = "\n".join(text_parts).strip()
+        response = "\n\n".join(segments).strip()
         if not response:
-            # Fallback: try to get any stdout that wasn't NDJSON
             stderr_text = "\n".join(stderr_tail).strip()
             if stderr_text:
                 raise RuntimeError(
