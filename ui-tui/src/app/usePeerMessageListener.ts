@@ -14,7 +14,7 @@
  * user_message_chunks too) against a small LRU of recently-sent text.
  */
 import { useEffect, useRef } from 'react'
-import { estimateTokensRough } from '../lib/text.js'
+import { buildToolTrailLine, estimateTokensRough } from '../lib/text.js'
 import type { Msg } from '../types.js'
 
 interface Params {
@@ -40,11 +40,20 @@ const PEER_TURN_IDLE_MS = 1500
 // own submission window.
 const OWN_TURN_IDLE_MS = 3000
 
+interface PeerToolCall {
+  toolCallId: string
+  name: string
+  context: string
+  startTime: number
+  duration?: number
+  error?: boolean
+}
+
 interface PeerTurnAccumulator {
   prompt: string
   thinking: string
   response: string
-  tools: string[]
+  toolCalls: PeerToolCall[]
   toolOutputChars: number
   active: boolean
 }
@@ -53,10 +62,16 @@ const emptyPeerTurn = (): PeerTurnAccumulator => ({
   prompt: '',
   thinking: '',
   response: '',
-  tools: [],
+  toolCalls: [],
   toolOutputChars: 0,
   active: false
 })
+
+function splitToolTitle(title: string): { name: string; context: string } {
+  const colon = title.indexOf(': ')
+  if (colon < 0) return { name: title, context: '' }
+  return { name: title.slice(0, colon), context: title.slice(colon + 2) }
+}
 
 export function usePeerMessageListener({ appendMessage, lastUserMsgRef, sys }: Params): void {
   const stoppedRef = useRef(false)
@@ -127,7 +142,7 @@ export function usePeerMessageListener({ appendMessage, lastUserMsgRef, sys }: P
       //    `└─ Σ ~M total` tree. toolTokens is estimated from cumulative
       //    tool output character counts (same heuristic turnController uses).
       const thinkingText = turn.thinking.trim()
-      if (thinkingText || turn.tools.length > 0) {
+      if (thinkingText || turn.toolCalls.length > 0) {
         const trail: Partial<Msg> & { kind: 'trail'; role: 'system'; text: string } = {
           kind: 'trail',
           role: 'system',
@@ -137,8 +152,14 @@ export function usePeerMessageListener({ appendMessage, lastUserMsgRef, sys }: P
           trail.thinking = thinkingText
           trail.thinkingTokens = estimateTokensRough(thinkingText)
         }
-        if (turn.tools.length) {
-          trail.tools = turn.tools
+        if (turn.toolCalls.length) {
+          // ToolTrail's `trail` prop expects strings produced by
+          // buildToolTrailLine (ending in ✓ or ✗) so parseToolTrailResultLine
+          // can pull out the name/context/duration. Raw tool titles don't
+          // parse and render as nothing.
+          trail.tools = turn.toolCalls.map(tc =>
+            buildToolTrailLine(tc.name, tc.context, !!tc.error, undefined, tc.duration)
+          )
         }
         if (turn.toolOutputChars > 0) {
           trail.toolTokens = (turn.toolOutputChars + 3) >> 2
@@ -322,6 +343,20 @@ export function usePeerMessageListener({ appendMessage, lastUserMsgRef, sys }: P
                 }
                 if (matchedIdx >= 0) {
                   lru.splice(matchedIdx, 1) // consume the dedup token
+                  // Race fix: the bridge's echo of our own outgoing prompt
+                  // can arrive BEFORE the syncInterval poll has set
+                  // ownTurnActive. Set it now so subsequent tool_call /
+                  // agent_message_chunk events for THIS turn fall into the
+                  // mute branch instead of bleeding into a phantom peer turn.
+                  ownTurnActiveRef.current = true
+                  // Also drop any in-flight peer turn accumulator (those
+                  // events were probably also our own).
+                  peerTurnRef.current = emptyPeerTurn()
+                  if (peerTurnTimerRef.current) {
+                    clearTimeout(peerTurnTimerRef.current)
+                    peerTurnTimerRef.current = null
+                  }
+                  refreshOwnTurnIdle()
                   return
                 }
                 // A new peer turn starts. Flush any previous turn that's
@@ -340,7 +375,7 @@ export function usePeerMessageListener({ appendMessage, lastUserMsgRef, sys }: P
                   prompt: display,
                   thinking: '',
                   response: '',
-                  tools: [],
+                  toolCalls: [],
                   toolOutputChars: 0,
                   active: true
                 }
@@ -356,11 +391,33 @@ export function usePeerMessageListener({ appendMessage, lastUserMsgRef, sys }: P
                 peerTurnRef.current.active = true
                 schedulePeerTurnFlush()
               } else if (kind === 'tool_call') {
-                const name = update.title ?? update.name ?? 'tool'
-                peerTurnRef.current.tools.push(String(name))
+                const title = String(update.title ?? update.name ?? 'tool')
+                const { name, context: ctx } = splitToolTitle(title)
+                const toolCallId = String(update.toolCallId ?? '')
+                peerTurnRef.current.toolCalls.push({
+                  toolCallId,
+                  name,
+                  context: ctx,
+                  startTime: Date.now()
+                })
                 peerTurnRef.current.active = true
                 schedulePeerTurnFlush()
               } else if (kind === 'tool_call_update') {
+                const toolCallId = String(update.toolCallId ?? '')
+                const status = String(update.status ?? '')
+                const tool = peerTurnRef.current.toolCalls.find(
+                  t => t.toolCallId === toolCallId
+                )
+                if (tool) {
+                  if (status === 'completed' && tool.duration === undefined) {
+                    tool.duration = (Date.now() - tool.startTime) / 1000
+                  } else if (status === 'failed' || status === 'cancelled') {
+                    tool.error = true
+                    if (tool.duration === undefined) {
+                      tool.duration = (Date.now() - tool.startTime) / 1000
+                    }
+                  }
+                }
                 // Accumulate tool output character count so the trail can
                 // show a `Σ ~N total` token line, matching native render.
                 const outputText =
@@ -369,9 +426,9 @@ export function usePeerMessageListener({ appendMessage, lastUserMsgRef, sys }: P
                     : ''
                 if (outputText) {
                   peerTurnRef.current.toolOutputChars += outputText.length
-                  peerTurnRef.current.active = true
-                  schedulePeerTurnFlush()
                 }
+                peerTurnRef.current.active = true
+                schedulePeerTurnFlush()
               }
               // plan kind: still hidden in v0.
             })
