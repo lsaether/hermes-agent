@@ -341,6 +341,7 @@ export function usePeerMessageListener({ appendMessage, lastUserMsgRef, sys }: P
                   thinking: '',
                   response: '',
                   tools: [],
+                  toolOutputChars: 0,
                   active: true
                 }
                 schedulePeerTurnFlush()
