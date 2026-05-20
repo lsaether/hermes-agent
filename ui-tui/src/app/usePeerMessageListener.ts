@@ -27,12 +27,19 @@ interface Params {
 const HANDSHAKE_TIMEOUT_MS = 10_000
 const RECONNECT_DELAY_MS = 2_000
 
+const PEER_AGENT_FLUSH_MS = 600
+
 export function usePeerMessageListener({ appendMessage, lastUserMsgRef, sys }: Params): void {
   const stoppedRef = useRef(false)
   const wsRef = useRef<WebSocket | null>(null)
   // LRU of texts the user just submitted — when the bridge echoes our prompt
   // back as a user_message_chunk we suppress it.
   const recentSelfMessagesRef = useRef<string[]>([])
+  // Buffer for token-level agent_message_chunk streams; flushed on a debounce
+  // timer so the transcript gets one coalesced line per agent burst instead
+  // of one system line per token.
+  const peerAgentBufRef = useRef<string>('')
+  const peerAgentTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     const bridgeUrl = (process.env.HERMES_BRIDGE_URL ?? '').trim()
@@ -162,6 +169,25 @@ export function usePeerMessageListener({ appendMessage, lastUserMsgRef, sys }: P
                 text = String(content.text ?? '').trim()
               }
 
+              const flushPeerAgentBuf = () => {
+                if (peerAgentTimerRef.current) {
+                  clearTimeout(peerAgentTimerRef.current)
+                  peerAgentTimerRef.current = null
+                }
+                const buffered = peerAgentBufRef.current.trim()
+                peerAgentBufRef.current = ''
+                if (buffered) {
+                  appendMessage({
+                    role: 'system',
+                    text: `🌐   ${buffered}`
+                  } as Msg)
+                }
+              }
+              const schedulePeerAgentFlush = () => {
+                if (peerAgentTimerRef.current) clearTimeout(peerAgentTimerRef.current)
+                peerAgentTimerRef.current = setTimeout(flushPeerAgentBuf, PEER_AGENT_FLUSH_MS)
+              }
+
               if (kind === 'user_message_chunk') {
                 if (!text) return
                 const lru = recentSelfMessagesRef.current
@@ -170,23 +196,58 @@ export function usePeerMessageListener({ appendMessage, lastUserMsgRef, sys }: P
                   lru.splice(selfIdx, 1) // consume the dedup token
                   return
                 }
+                // Flush any in-flight peer agent buffer first so events
+                // appear in the order they happened.
+                flushPeerAgentBuf()
                 // Render as `role: 'system'` so the Ink TUI gives it the
-                // muted single-line treatment (· glyph, no bubble), not the
-                // full user/assistant chat-bubble look. This visually
-                // distinguishes peer activity from local conversation.
+                // muted single-line treatment (· glyph, no bubble).
                 appendMessage({
                   role: 'system',
                   text: `🌐 peer: ${text}`
                 } as Msg)
+              } else if (kind === 'agent_message_chunk') {
+                // Append to the peer-agent buffer and schedule a debounced
+                // flush. Each token doesn't emit its own system line; we
+                // wait for a quiet window (~600ms) then emit one coalesced
+                // line. Punctuation/newlines naturally pause a stream so
+                // this gives sentence-ish chunks.
+                if (!text) return
+                peerAgentBufRef.current += text
+                schedulePeerAgentFlush()
+              } else if (kind === 'tool_call') {
+                flushPeerAgentBuf()
+                const name = update.title ?? update.name ?? 'tool'
+                const tkind = update.kind
+                const label = tkind && tkind !== name ? `${name} (${tkind})` : String(name)
+                appendMessage({
+                  role: 'system',
+                  text: `🌐 🔧 ${label}`
+                } as Msg)
+              } else if (kind === 'tool_call_update') {
+                const status = update.status
+                const contentText =
+                  content && typeof content === 'object' ? String(content.text ?? '').trim() : ''
+                if (contentText) {
+                  flushPeerAgentBuf()
+                  const snippet =
+                    contentText.length > 120
+                      ? contentText.slice(0, 120) + '…'
+                      : contentText
+                  appendMessage({
+                    role: 'system',
+                    text: `🌐    ${snippet}`
+                  } as Msg)
+                } else if (status && status !== 'in_progress') {
+                  // Status-only update (e.g. completed) — surface briefly.
+                  appendMessage({
+                    role: 'system',
+                    text: `🌐    (${status})`
+                  } as Msg)
+                }
               }
-              // agent_message_chunk and tool_call from peer turns are
-              // intentionally dropped in v0 — they'd flood the transcript
-              // with token-by-token streaming every time the agent replies
-              // to a peer's prompt. The peer's own client renders them; you
-              // don't need them in your TUI to know what's happening (the
-              // peer's user_message_chunk + the eventual response when YOU
-              // ask is enough context). Future work: a /peer command to
-              // attach to a peer's turn and stream their agent output.
+              // agent_thought_chunk and plan kinds remain hidden in v0 — most
+              // noise/value trade-off lives in the agent_message_chunk +
+              // tool_call paths above. Add explicit cases if you want them.
             })
 
             ws.addEventListener('close', () => resolve())
@@ -211,6 +272,13 @@ export function usePeerMessageListener({ appendMessage, lastUserMsgRef, sys }: P
     return () => {
       stoppedRef.current = true
       clearInterval(syncInterval)
+      if (peerAgentTimerRef.current) {
+        clearTimeout(peerAgentTimerRef.current)
+        peerAgentTimerRef.current = null
+      }
+      // Drop any half-buffered text on unmount; no need to flush since the
+      // app is going down.
+      peerAgentBufRef.current = ''
       const ws = wsRef.current
       if (ws && ws.readyState !== ws.CLOSED) {
         try {
