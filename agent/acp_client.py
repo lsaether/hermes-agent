@@ -297,8 +297,11 @@ class ACPClient:
 
     def _run_acpx(self, prompt_text: str, *, timeout_seconds: float) -> str:
         """Spawn acpx with the prompt and collect the response text."""
-        # Build the full command: acpx <agent> exec '<prompt>' --approve-all
-        argv = self._acp_argv + ["exec", prompt_text, "--approve-all"]
+        # Build the full command: acpx <agent> exec '<prompt>'
+        # NOTE: the patch's original version appended --approve-all, but the
+        # current acpx CLI no longer accepts that flag (tool approval moved to
+        # protocol-level permission/request). Removing it unblocks claude-acp.
+        argv = self._acp_argv + ["exec", prompt_text]
 
         # Build subprocess env: inherit parent + inject auth vars
         spawn_env: dict[str, str] | None = None
