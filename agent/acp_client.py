@@ -30,6 +30,28 @@ ACP_MARKER_PREFIX = "acp://"
 _DEFAULT_TIMEOUT_SECONDS = 900.0
 
 
+def _timeout_to_seconds(timeout: Any) -> float:
+    """Coerce a timeout value (float, int, httpx.Timeout, or None) to seconds.
+
+    Hermes' agent runtime passes an ``httpx.Timeout`` object through the
+    OpenAI client kwargs. The acpx subprocess invocation needs a plain number
+    of seconds. Pick the most permissive available field: ``read`` if set,
+    else fall back to whatever total or scalar value is available.
+    """
+    if timeout is None:
+        return _DEFAULT_TIMEOUT_SECONDS
+    if isinstance(timeout, (int, float)):
+        return float(timeout)
+    for attr in ("read", "total", "connect", "pool"):
+        val = getattr(timeout, attr, None)
+        if val is not None:
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                continue
+    return _DEFAULT_TIMEOUT_SECONDS
+
+
 def extract_agent_from_url(base_url: str) -> Optional[str]:
     """Extract agent name from an ``acp://<agent>`` URL, or return ``None``."""
     if not base_url or not base_url.startswith(ACP_MARKER_PREFIX):
@@ -183,7 +205,7 @@ class ACPClient:
         *,
         model: str | None = None,
         messages: list[dict[str, Any]] | None = None,
-        timeout: float | None = None,
+        timeout: Any = None,
         **_: Any,
     ) -> Any:
         prompt_text = _format_messages_as_prompt(
@@ -191,7 +213,7 @@ class ACPClient:
         )
         response_text = self._run_acpx(
             prompt_text,
-            timeout_seconds=float(timeout or _DEFAULT_TIMEOUT_SECONDS),
+            timeout_seconds=_timeout_to_seconds(timeout),
         )
 
         usage = SimpleNamespace(

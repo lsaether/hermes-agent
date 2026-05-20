@@ -457,6 +457,12 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
     # -- ACP agent providers (Agent Client Protocol) -------------------------
     # Each spawns an external coding agent via ACP. Auth is handled by the
     # agent's own adapter, with env var bridging in acp_agent_registry.py.
+    "hermes-acp": ProviderConfig(
+        id="hermes-acp",
+        name="Hermes (ACP)",
+        auth_type="external_process",
+        inference_base_url="acp://hermes",
+    ),
     "claude-acp": ProviderConfig(
         id="claude-acp",
         name="Claude (ACP)",
