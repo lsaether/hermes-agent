@@ -678,7 +678,10 @@ def execute_tool_calls_sequential(agent, assistant_message, messages: list, effe
             agent._delegate_spinner = spinner
             _delegate_result = None
             try:
-                function_result = agent._dispatch_delegate_task(function_args)
+                function_result = agent._dispatch_delegate_task(
+                    function_args,
+                    creator_tool_call_id=getattr(tool_call, "id", None),
+                )
                 _delegate_result = function_result
             finally:
                 agent._delegate_spinner = None

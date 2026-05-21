@@ -404,6 +404,14 @@ class AIAgent:
         skip_memory: bool = False,
         session_db=None,
         parent_session_id: str = None,
+        session_kind: str = "main",
+        root_session_id: Optional[str] = None,
+        creator_kind: Optional[str] = None,
+        creator_tool_name: Optional[str] = None,
+        creator_tool_call_id: Optional[str] = None,
+        creator_task_index: Optional[int] = None,
+        creator_command: Optional[str] = None,
+        is_user_facing: bool = True,
         iteration_budget: "IterationBudget" = None,
         fallback_model: Dict[str, Any] = None,
         credential_pool=None,
@@ -473,6 +481,14 @@ class AIAgent:
             skip_memory=skip_memory,
             session_db=session_db,
             parent_session_id=parent_session_id,
+            session_kind=session_kind,
+            root_session_id=root_session_id,
+            creator_kind=creator_kind,
+            creator_tool_name=creator_tool_name,
+            creator_tool_call_id=creator_tool_call_id,
+            creator_task_index=creator_task_index,
+            creator_command=creator_command,
+            is_user_facing=is_user_facing,
             iteration_budget=iteration_budget,
             fallback_model=fallback_model,
             credential_pool=credential_pool,
@@ -515,6 +531,14 @@ class AIAgent:
                 system_prompt=self._cached_system_prompt,
                 user_id=None,
                 parent_session_id=self._parent_session_id,
+                session_kind=getattr(self, "_session_kind", "main"),
+                root_session_id=getattr(self, "_root_session_id", None),
+                creator_kind=getattr(self, "_creator_kind", None),
+                creator_tool_name=getattr(self, "_creator_tool_name", None),
+                creator_tool_call_id=getattr(self, "_creator_tool_call_id", None),
+                creator_task_index=getattr(self, "_creator_task_index", None),
+                creator_command=getattr(self, "_creator_command", None),
+                is_user_facing=getattr(self, "_is_user_facing", True),
             )
             self._session_db_created = True
         except Exception as e:
@@ -3828,11 +3852,18 @@ class AIAgent:
         finally:
             self._executing_tools = False
 
-    def _dispatch_delegate_task(self, function_args: dict) -> str:
+    def _dispatch_delegate_task(
+        self,
+        function_args: dict,
+        *,
+        creator_tool_call_id: Optional[str] = None,
+    ) -> str:
         """Single call site for delegate_task dispatch.
 
         New DELEGATE_TASK_SCHEMA fields only need to be added here to reach all
-        invocation paths (concurrent, sequential, inline).
+        invocation paths (concurrent, sequential, inline). ``creator_tool_call_id``
+        is the parent model's tool-call id; it is internal provenance, not a
+        schema field exposed to the model.
         """
         from tools.delegate_tool import delegate_task as _delegate_task
         return _delegate_task(
@@ -3845,6 +3876,7 @@ class AIAgent:
             acp_args=function_args.get("acp_args"),
             role=function_args.get("role"),
             parent_agent=self,
+            creator_tool_call_id=creator_tool_call_id,
         )
 
     def _invoke_tool(self, function_name: str, function_args: dict, effective_task_id: str,

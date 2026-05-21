@@ -888,6 +888,7 @@ def _build_child_agent(
     # 'leaf' (default) cannot; 'orchestrator' retains the delegation
     # toolset subject to depth/kill-switch bounds applied below.
     role: str = "leaf",
+    creator_tool_call_id: Optional[str] = None,
 ):
     """
     Build a child AIAgent on the main thread (thread-safe construction).
@@ -1127,6 +1128,12 @@ def _build_child_agent(
         thinking_callback=child_thinking_cb,
         session_db=getattr(parent_agent, "_session_db", None),
         parent_session_id=getattr(parent_agent, "session_id", None),
+        session_kind="delegate_child",
+        creator_kind="tool_call",
+        creator_tool_name="delegate_task",
+        creator_tool_call_id=creator_tool_call_id,
+        creator_task_index=task_index,
+        is_user_facing=False,
         providers_allowed=child_providers_allowed,
         providers_ignored=child_providers_ignored,
         providers_order=child_providers_order,
@@ -1925,6 +1932,7 @@ def delegate_task(
     acp_args: Optional[List[str]] = None,
     role: Optional[str] = None,
     parent_agent=None,
+    creator_tool_call_id: Optional[str] = None,
 ) -> str:
     """
     Spawn one or more child agents to handle delegated tasks.
@@ -2080,6 +2088,7 @@ def delegate_task(
                     else (acp_args if acp_args is not None else creds.get("args"))
                 ),
                 role=effective_role,
+                creator_tool_call_id=creator_tool_call_id,
             )
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names

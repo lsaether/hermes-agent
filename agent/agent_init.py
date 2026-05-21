@@ -194,6 +194,14 @@ def init_agent(
     skip_memory: bool = False,
     session_db=None,
     parent_session_id: str = None,
+    session_kind: str = "main",
+    root_session_id: Optional[str] = None,
+    creator_kind: Optional[str] = None,
+    creator_tool_name: Optional[str] = None,
+    creator_tool_call_id: Optional[str] = None,
+    creator_task_index: Optional[int] = None,
+    creator_command: Optional[str] = None,
+    is_user_facing: bool = True,
     iteration_budget: "IterationBudget" = None,
     fallback_model: Dict[str, Any] = None,
     credential_pool=None,
@@ -1000,6 +1008,14 @@ def init_agent(
     # SQLite session store (optional -- provided by CLI or gateway)
     agent._session_db = session_db
     agent._parent_session_id = parent_session_id
+    agent._session_kind = session_kind or "main"
+    agent._root_session_id = root_session_id
+    agent._creator_kind = creator_kind
+    agent._creator_tool_name = creator_tool_name
+    agent._creator_tool_call_id = creator_tool_call_id
+    agent._creator_task_index = creator_task_index
+    agent._creator_command = creator_command
+    agent._is_user_facing = is_user_facing
     agent._last_flushed_db_idx = 0  # tracks DB-write cursor to prevent duplicate writes
     agent._session_db_created = False  # DB row deferred to run_conversation()
     agent._session_init_model_config = {

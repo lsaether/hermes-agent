@@ -12,10 +12,14 @@ Run with:  python -m pytest tests/test_delegate.py -v
 import json
 import os
 import sys
+import tempfile
 import threading
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
+
+from hermes_state import SessionDB
 
 from tools.delegate_tool import (
     DELEGATE_BLOCKED_TOOLS,
@@ -215,6 +219,101 @@ class TestDelegateTask(unittest.TestCase):
         self.assertEqual(result["results"][0]["summary"], "Result A")
         self.assertEqual(result["results"][1]["summary"], "Result B")
         self.assertIn("total_duration_seconds", result)
+
+    def test_batch_children_persist_delegate_tool_call_provenance(self):
+        class PersistingFakeAgent:
+            _counter = 0
+            _counter_lock = threading.Lock()
+
+            def __init__(self, **kwargs):
+                with self._counter_lock:
+                    type(self)._counter += 1
+                    self.session_id = f"child-session-{type(self)._counter}"
+                self.__dict__.update(kwargs)
+                self.model = kwargs.get("model") or "mock-model"
+                self.platform = kwargs.get("platform") or "cli"
+                self.session_prompt_tokens = 0
+                self.session_completion_tokens = 0
+                self.session_reasoning_tokens = 0
+                self.session_estimated_cost_usd = 0.0
+                self._credential_pool = None
+
+            def run_conversation(self, user_message, task_id=None):
+                session_db = getattr(self, "session_db")
+                session_db.create_session(
+                    session_id=self.session_id,
+                    source=self.platform,
+                    model=self.model,
+                    parent_session_id=getattr(self, "parent_session_id"),
+                    session_kind=getattr(self, "session_kind"),
+                    root_session_id=getattr(self, "root_session_id", None),
+                    creator_kind=getattr(self, "creator_kind"),
+                    creator_tool_name=getattr(self, "creator_tool_name"),
+                    creator_tool_call_id=getattr(self, "creator_tool_call_id"),
+                    creator_task_index=getattr(self, "creator_task_index"),
+                    creator_command=getattr(self, "creator_command", None),
+                    is_user_facing=getattr(self, "is_user_facing"),
+                )
+                return {"final_response": user_message, "completed": True, "api_calls": 1}
+
+            def get_activity_summary(self):
+                return {"api_call_count": 0, "max_iterations": 10, "current_tool": None}
+
+            def close(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db = SessionDB(Path(tmpdir) / "sessions.db")
+            try:
+                parent = _make_mock_parent()
+                parent.session_id = "parent-session"
+                parent._session_db = db
+                db.create_session(session_id=parent.session_id, source="cli")
+
+                PersistingFakeAgent._counter = 0
+                with patch("run_agent.AIAgent", new=PersistingFakeAgent):
+                    result = json.loads(
+                        delegate_task(
+                            tasks=[{"goal": "Research A"}, {"goal": "Research B"}],
+                            parent_agent=parent,
+                            creator_tool_call_id="call_delegate_123",
+                        )
+                    )
+
+                self.assertEqual(len(result["results"]), 2)
+                children = sorted(
+                    [
+                        session
+                        for session in db.search_sessions(limit=10)
+                        if session["parent_session_id"] == parent.session_id
+                    ],
+                    key=lambda session: session["creator_task_index"],
+                )
+                self.assertEqual(len(children), 2)
+                self.assertEqual([c["creator_task_index"] for c in children], [0, 1])
+                for child in children:
+                    self.assertEqual(child["session_kind"], "delegate_child")
+                    self.assertEqual(child["root_session_id"], parent.session_id)
+                    self.assertEqual(child["creator_kind"], "tool_call")
+                    self.assertEqual(child["creator_tool_name"], "delegate_task")
+                    self.assertEqual(child["creator_tool_call_id"], "call_delegate_123")
+                    self.assertEqual(child["is_user_facing"], 0)
+            finally:
+                db.close()
+
+    def test_dispatch_delegate_task_forwards_parent_tool_call_id(self):
+        from run_agent import AIAgent
+
+        agent = AIAgent.__new__(AIAgent)
+        with patch("tools.delegate_tool.delegate_task", return_value='{"results": []}') as mock_delegate:
+            result = agent._dispatch_delegate_task(
+                {"goal": "Correlate child"},
+                creator_tool_call_id="call_parent_456",
+            )
+
+        self.assertEqual(result, '{"results": []}')
+        _, kwargs = mock_delegate.call_args
+        self.assertEqual(kwargs["creator_tool_call_id"], "call_parent_456")
 
     @patch("tools.delegate_tool._run_single_child")
     def test_batch_mode_accepts_json_string_tasks(self, mock_run):
