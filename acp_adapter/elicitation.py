@@ -8,11 +8,13 @@ preserve unstable capability fields in metadata.
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Awaitable
+from typing import Any, cast
 
 __all__ = [
     "OTHER_LABEL",
     "build_clarify_requested_schema",
+    "create_form_elicitation",
     "extract_clarify_answer",
     "supports_form_elicitation",
 ]
@@ -87,6 +89,41 @@ def build_clarify_requested_schema(*, question: str, choices: list[str] | None) 
         },
         "required": ["answer"],
     }
+
+
+async def create_form_elicitation(
+    conn: object,
+    *,
+    session_id: str,
+    question: str,
+    choices: list[str] | None,
+) -> object:
+    """Send an ACP form elicitation request and return the client response."""
+    requested_schema = build_clarify_requested_schema(question=question, choices=choices)
+
+    typed_helper = getattr(conn, "create_elicitation", None)
+    if callable(typed_helper):
+        result = typed_helper(
+            session_id=session_id,
+            mode="form",
+            message=question,
+            requested_schema=requested_schema,
+        )
+        return await cast(Awaitable[object], result)
+
+    params = {
+        "sessionId": session_id,
+        "mode": "form",
+        "message": question,
+        "requestedSchema": requested_schema,
+    }
+
+    raw_conn = getattr(conn, "_conn", conn)
+    send_request = getattr(raw_conn, "send_request", None)
+    if not callable(send_request):
+        raise RuntimeError("ACP connection does not support elicitation/create requests")
+    result = send_request("elicitation/create", params)
+    return await cast(Awaitable[object], result)
 
 
 def extract_clarify_answer(response: object) -> str:

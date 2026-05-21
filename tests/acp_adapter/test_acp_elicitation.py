@@ -1,7 +1,10 @@
 from types import SimpleNamespace
 
+import pytest
+
 from acp_adapter.elicitation import (
     build_clarify_requested_schema,
+    create_form_elicitation,
     extract_clarify_answer,
     supports_form_elicitation,
 )
@@ -75,3 +78,53 @@ def test_decline_cancel_or_missing_returns_standard_sentinel():
     assert extract_clarify_answer({"action": "decline"}) == "[user declined the clarification]"
     assert extract_clarify_answer({"action": "cancel"}) == "[user cancelled the clarification]"
     assert extract_clarify_answer(None) == "[clarify prompt could not be delivered]"
+
+
+class TypedConn:
+    def __init__(self):
+        self.calls = []
+
+    async def create_elicitation(self, **kwargs):
+        self.calls.append(kwargs)
+        return {"action": "accept", "content": {"answer": "typed"}}
+
+
+class RawConn:
+    def __init__(self):
+        self.requests = []
+        self._conn = self
+
+    async def send_request(self, method, params):
+        self.requests.append((method, params))
+        return {"action": "accept", "content": {"answer": "raw"}}
+
+
+@pytest.mark.asyncio
+async def test_create_form_elicitation_prefers_typed_helper_if_available():
+    conn = TypedConn()
+    response = await create_form_elicitation(
+        conn,
+        session_id="s1",
+        question="Q?",
+        choices=None,
+    )
+    assert response["content"]["answer"] == "typed"
+    assert conn.calls[0].get("session_id") == "s1" or conn.calls[0].get("sessionId") == "s1"
+
+
+@pytest.mark.asyncio
+async def test_create_form_elicitation_uses_raw_json_rpc_fallback():
+    conn = RawConn()
+    response = await create_form_elicitation(
+        conn,
+        session_id="s1",
+        question="Q?",
+        choices=["A", "B"],
+    )
+    assert response["content"]["answer"] == "raw"
+    method, params = conn.requests[0]
+    assert method == "elicitation/create"
+    assert params["sessionId"] == "s1"
+    assert params["mode"] == "form"
+    assert params["message"] == "Q?"
+    assert params["requestedSchema"]["required"] == ["answer"]
