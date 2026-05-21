@@ -327,6 +327,7 @@ async def test_prompt_wires_clarify_callback_to_elicitation(monkeypatch):
 
     assert fake.clarify_answers == ["Elicited"]
     assert conn.requests[0][0] == "elicitation/create"
+    assert conn.request_permission_calls == []
     assert fake.clarify_callback is original_callback
 
 
