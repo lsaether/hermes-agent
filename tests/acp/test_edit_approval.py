@@ -243,6 +243,86 @@ def test_denied_write_file_fails_closed_when_reattempt_requester_raises(tmp_path
     assert isinstance(requests[1], DeniedEditReattempt)
 
 
+def test_active_acp_guard_exception_blocks_terminal_instead_of_fail_open(monkeypatch, tmp_path):
+    target = tmp_path / "sample.txt"
+    target.write_text("before\n", encoding="utf-8")
+    set_edit_approval_requester(lambda _proposal: True)
+
+    import acp_adapter.edit_approval as edit_approval
+
+    def broken_guard(_tool_name, _arguments):
+        raise RuntimeError("guard bug")
+
+    monkeypatch.setattr(edit_approval, "maybe_require_edit_approval", broken_guard)
+
+    code = f"from pathlib import Path; Path({str(target)!r}).write_text('after\\n', encoding='utf-8')"
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
+    result = json.loads(
+        handle_function_call(
+            "terminal",
+            {"command": command},
+            task_id="acp-edit-terminal-guard-exception",
+        )
+    )
+
+    assert "approval guard failed" in result["error"]
+    assert target.read_text(encoding="utf-8") == "before\n"
+
+
+def test_active_acp_guard_exception_blocks_execute_code_instead_of_fail_open(monkeypatch, tmp_path):
+    target = tmp_path / "sample.txt"
+    target.write_text("before\n", encoding="utf-8")
+    set_edit_approval_requester(lambda _proposal: True)
+
+    import acp_adapter.edit_approval as edit_approval
+
+    def broken_guard(_tool_name, _arguments):
+        raise RuntimeError("guard bug")
+
+    monkeypatch.setattr(edit_approval, "maybe_require_edit_approval", broken_guard)
+
+    result = json.loads(
+        handle_function_call(
+            "execute_code",
+            {
+                "code": (
+                    "from pathlib import Path\n"
+                    f"Path({str(target)!r}).write_text('after\\n', encoding='utf-8')\n"
+                )
+            },
+            task_id="acp-edit-code-guard-exception",
+        )
+    )
+
+    assert "approval guard failed" in result["error"]
+    assert target.read_text(encoding="utf-8") == "before\n"
+
+
+def test_inactive_acp_guard_exception_does_not_block_terminal_tool(monkeypatch, tmp_path):
+    target = tmp_path / "sample.txt"
+    target.write_text("before\n", encoding="utf-8")
+
+    import acp_adapter.edit_approval as edit_approval
+
+    def broken_guard(_tool_name, _arguments):
+        raise RuntimeError("guard bug")
+
+    monkeypatch.setattr(edit_approval, "maybe_require_edit_approval", broken_guard)
+
+    code = f"from pathlib import Path; Path({str(target)!r}).write_text('after\\n', encoding='utf-8')"
+    command = f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
+    result = json.loads(
+        handle_function_call(
+            "terminal",
+            {"command": command},
+            task_id="non-acp-terminal-guard-exception",
+        )
+    )
+
+    assert result.get("exit_code") == 0
+    assert target.read_text(encoding="utf-8") == "after\n"
+
+
 def test_denied_write_file_prompts_for_shell_quoted_terminal_redirect_to_same_path(tmp_path):
     target = tmp_path / "quo'te.txt"
     target.write_text("before\n", encoding="utf-8")
