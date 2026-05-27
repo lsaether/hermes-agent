@@ -956,6 +956,42 @@ def _run_cleanup():
         pass
 
 
+def _finalize_single_query_session(cli, result=None) -> None:
+    """Mark a non-interactive CLI query session ended.
+
+    Interactive CLI sessions close in ``HermesCLI.run()``.  Single-query
+    invocations (``hermes chat -q ...``) bypass that loop, so they need their
+    own DB finalization.  Prefer ``agent.session_id`` because compression can
+    rotate the active session during the turn.
+    """
+    db = getattr(cli, "_session_db", None)
+    if not db:
+        return
+
+    agent = getattr(cli, "agent", None)
+    session_id = getattr(agent, "session_id", None) or getattr(cli, "session_id", None)
+    if not session_id:
+        return
+
+    interrupted = bool(getattr(cli, "_last_turn_interrupted", False))
+    failed = False
+    if isinstance(result, dict):
+        interrupted = interrupted or bool(result.get("interrupted"))
+        failed = bool(result.get("failed"))
+
+    if interrupted:
+        end_reason = "single_query_interrupted"
+    elif failed:
+        end_reason = "single_query_failed"
+    else:
+        end_reason = "single_query_complete"
+
+    try:
+        db.end_session(session_id, end_reason)
+    except (Exception, KeyboardInterrupt) as exc:
+        logger.debug("Could not close single-query session in DB: %s", exc)
+
+
 # =============================================================================
 # Git Worktree Isolation (#652)
 # =============================================================================
@@ -15040,47 +15076,61 @@ def main(
                     runtime_override=turn_route["runtime"],
                     request_overrides=turn_route.get("request_overrides"),
                 ):
-                    cli.agent.quiet_mode = True
-                    cli.agent.suppress_status_output = True
+                    agent = cli.agent
+                    if agent is None:
+                        _finalize_single_query_session(cli, {"failed": True})
+                        sys.exit(1)
+                    setattr(agent, "quiet_mode", True)
+                    setattr(agent, "suppress_status_output", True)
                     # Suppress streaming display callbacks so stdout stays
                     # machine-readable (no styled "Hermes" box, no tool-gen
                     # status lines).  The response is printed once below.
-                    cli.agent.stream_delta_callback = None
-                    cli.agent.tool_gen_callback = None
-                    result = cli.agent.run_conversation(
-                        user_message=effective_query,
-                        conversation_history=cli.conversation_history,
-                    )
-                    # Sync session_id if mid-run compression created a
-                    # continuation session. The exit line below reports
-                    # session_id to stderr for automation wrappers; without
-                    # this sync it would point at the ended parent.
-                    if (
-                        getattr(cli.agent, "session_id", None)
-                        and cli.agent.session_id != cli.session_id
-                    ):
-                        cli.session_id = cli.agent.session_id
-                    response = result.get("final_response", "") if isinstance(result, dict) else str(result)
-                    # Surface backend errors that produced no visible output
-                    # (e.g. invalid model slug → provider 4xx). Mirrors the
-                    # interactive CLI path. Write to stderr so piped stdout
-                    # stays clean for automation wrappers.
-                    if (
-                        not response
-                        and isinstance(result, dict)
-                        and result.get("error")
-                        and (result.get("failed") or result.get("partial"))
-                    ):
-                        print(f"Error: {result['error']}", file=sys.stderr)
-                    elif response:
-                        print(response)
-                    # Session ID goes to stderr so piped stdout is clean.
-                    print(f"\nsession_id: {cli.session_id}", file=sys.stderr)
-                    
-                    # Ensure proper exit code for automation wrappers
-                    sys.exit(1 if isinstance(result, dict) and result.get("failed") else 0)
+                    setattr(agent, "stream_delta_callback", None)
+                    setattr(agent, "tool_gen_callback", None)
+                    result = None
+                    try:
+                        result = agent.run_conversation(
+                            user_message=effective_query,
+                            conversation_history=cli.conversation_history,
+                        )
+                        # Sync session_id if mid-run compression created a
+                        # continuation session. The exit line below reports
+                        # session_id to stderr for automation wrappers; without
+                        # this sync it would point at the ended parent.
+                        agent_session_id = getattr(agent, "session_id", None)
+                        if agent_session_id and agent_session_id != cli.session_id:
+                            cli.session_id = agent_session_id
+                        response = result.get("final_response", "") if isinstance(result, dict) else str(result)
+                        # Surface backend errors that produced no visible output
+                        # (e.g. invalid model slug → provider 4xx). Mirrors the
+                        # interactive CLI path. Write to stderr so piped stdout
+                        # stays clean for automation wrappers.
+                        if (
+                            not response
+                            and isinstance(result, dict)
+                            and result.get("error")
+                            and (result.get("failed") or result.get("partial"))
+                        ):
+                            print(f"Error: {result['error']}", file=sys.stderr)
+                        elif response:
+                            print(response)
+                        # Session ID goes to stderr so piped stdout is clean.
+                        print(f"\nsession_id: {cli.session_id}", file=sys.stderr)
+
+                        # Ensure proper exit code for automation wrappers
+                        sys.exit(1 if isinstance(result, dict) and result.get("failed") else 0)
+                    except KeyboardInterrupt:
+                        result = result or {"interrupted": True, "failed": True}
+                        raise
+                    except Exception:
+                        result = result or {"failed": True}
+                        raise
+                    finally:
+                        _finalize_single_query_session(cli, result)
             
-            # Exit with error code if credentials or agent init fails
+            # Exit with error code if credentials or agent init fails.  A
+            # session row may already exist, so close it as a failed one-shot.
+            _finalize_single_query_session(cli, {"failed": True})
             sys.exit(1)
         else:
             # Single-query mode (`hermes chat -q "…"`): skip the welcome
@@ -15102,8 +15152,23 @@ def main(
             # Surface security advisories before the agent runs — short
             # banner, doesn't depend on the welcome banner being shown.
             cli._show_security_advisories()
-            cli.chat(query, images=single_query_images or None)
-            cli._print_exit_summary()
+            response = None
+            finalize_result = None
+            try:
+                response = cli.chat(query, images=single_query_images or None)
+                finalize_result = {
+                    "failed": response is None,
+                    "interrupted": bool(getattr(cli, "_last_turn_interrupted", False)),
+                }
+                cli._print_exit_summary()
+            except KeyboardInterrupt:
+                finalize_result = {"interrupted": True, "failed": True}
+                raise
+            except Exception:
+                finalize_result = {"failed": True}
+                raise
+            finally:
+                _finalize_single_query_session(cli, finalize_result)
         return
     
     # Run interactive mode
