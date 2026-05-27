@@ -29,6 +29,10 @@ def _make_run_side_effect(
             return subprocess.CompletedProcess(
                 cmd, 0 if verify_ok else 128, stdout="", stderr=""
             )
+        if "rev-list" in joined and "--left-right" in joined:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout=f"{commit_count}\t0\n", stderr=""
+            )
         if "rev-list" in joined:
             return subprocess.CompletedProcess(
                 cmd, 0, stdout=f"{commit_count}\n", stderr=""
