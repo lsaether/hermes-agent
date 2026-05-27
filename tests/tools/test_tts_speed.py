@@ -10,6 +10,7 @@ import pytest
 def clean_env(monkeypatch):
     for key in (
         "OPENAI_API_KEY",
+        "ELEVENLABS_API_KEY",
         "MINIMAX_API_KEY",
         "MINIMAX_GROUP_ID",
         "HERMES_SESSION_PLATFORM",
@@ -112,6 +113,54 @@ class TestOpenaiTtsSpeed:
         create = self._run({"speed": 10.0}, tmp_path, monkeypatch)
         kwargs = create.call_args[1]
         assert kwargs["speed"] == 4.0
+
+
+# ---------------------------------------------------------------------------
+# ElevenLabs TTS speed
+# ---------------------------------------------------------------------------
+
+class TestElevenLabsTtsSpeed:
+    def _run(self, tts_config, tmp_path, monkeypatch):
+        from tools import tts_tool
+
+        monkeypatch.setattr(
+            tts_tool,
+            "get_env_value",
+            lambda name, default=None: "test-key" if name == "ELEVENLABS_API_KEY" else default,
+        )
+        mock_client = MagicMock()
+        mock_client.text_to_speech.convert.return_value = [b"audio"]
+        mock_cls = MagicMock(return_value=mock_client)
+
+        with patch("tools.tts_tool._import_elevenlabs", return_value=mock_cls):
+            from tools.tts_tool import _generate_elevenlabs
+            output = _generate_elevenlabs("Hello", str(tmp_path / "out.ogg"), tts_config)
+        return mock_client.text_to_speech.convert, output
+
+    def test_default_no_voice_settings(self, tmp_path, monkeypatch):
+        """No speed/settings config => no voice_settings kwarg."""
+        convert, output = self._run({}, tmp_path, monkeypatch)
+        kwargs = convert.call_args[1]
+        assert "voice_settings" not in kwargs
+        assert output.endswith(".ogg")
+
+    def test_global_speed_applied(self, tmp_path, monkeypatch):
+        """Global tts.speed is passed through as ElevenLabs voice_settings.speed."""
+        convert, _ = self._run({"speed": 1.08}, tmp_path, monkeypatch)
+        settings = convert.call_args[1]["voice_settings"]
+        assert (settings.get("speed") if isinstance(settings, dict) else settings.speed) == 1.08
+
+    def test_provider_speed_overrides_global(self, tmp_path, monkeypatch):
+        """tts.elevenlabs.speed takes precedence over tts.speed."""
+        convert, _ = self._run({"speed": 1.08, "elevenlabs": {"speed": 1.12}}, tmp_path, monkeypatch)
+        settings = convert.call_args[1]["voice_settings"]
+        assert (settings.get("speed") if isinstance(settings, dict) else settings.speed) == 1.12
+
+    def test_speed_clamped_to_elevenlabs_range(self, tmp_path, monkeypatch):
+        """Extreme values are clamped to ElevenLabs' practical speed range."""
+        convert, _ = self._run({"elevenlabs": {"speed": 2.0}}, tmp_path, monkeypatch)
+        settings = convert.call_args[1]["voice_settings"]
+        assert (settings.get("speed") if isinstance(settings, dict) else settings.speed) == 1.2
 
 
 # ---------------------------------------------------------------------------
