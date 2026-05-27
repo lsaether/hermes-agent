@@ -718,8 +718,8 @@ describe('createSlashHandler', () => {
     expect(ctx.transcript.sys).toHaveBeenCalledWith('no active session — nothing to rollback')
   })
 
-  it('/title <name> uses session.title RPC and bypasses slash.exec', async () => {
-    patchUiState({ sid: 'sid-abc' })
+  it('/title <name> uses session.title RPC and updates the live session title', async () => {
+    patchUiState({ info: { model: 'openai/gpt-5.5', skills: {}, tools: {} }, sid: 'sid-abc' })
     const rpc = vi.fn(() => Promise.resolve({ pending: false, title: 'my title' }))
     const ctx = buildCtx({ gateway: { ...buildGateway(), rpc } })
 
@@ -728,6 +728,7 @@ describe('createSlashHandler', () => {
     expect(rpc).toHaveBeenCalledWith('session.title', { session_id: 'sid-abc', title: 'my title' })
     expect(ctx.gateway.gw.request).not.toHaveBeenCalled()
     await vi.waitFor(() => {
+      expect(getUiState().info?.title).toBe('my title')
       expect(ctx.transcript.sys).toHaveBeenCalledWith('session title set: my title')
     })
   })
@@ -744,6 +745,45 @@ describe('createSlashHandler', () => {
     await vi.waitFor(() => {
       expect(ctx.transcript.sys).toHaveBeenCalledWith('title: demo title')
     })
+  })
+
+  it('/name <label> aliases to the durable session title when a session is active', async () => {
+    patchUiState({ info: { model: 'openai/gpt-5.5', skills: {}, tools: {} }, sid: 'sid-abc' })
+    const rpc = vi.fn(() => Promise.resolve({ pending: false, title: 'Research' }))
+    const ctx = buildCtx({ gateway: { ...buildGateway(), rpc } })
+
+    expect(createSlashHandler(ctx)('/name Research')).toBe(true)
+
+    expect(rpc).toHaveBeenCalledWith('session.title', { session_id: 'sid-abc', title: 'Research' })
+    expect(ctx.gateway.gw.request).not.toHaveBeenCalled()
+    await vi.waitFor(() => {
+      expect(getUiState().info?.title).toBe('Research')
+      expect(ctx.transcript.sys).toHaveBeenCalledWith('session title set: Research')
+    })
+  })
+
+  it('/name <label> falls back to the legacy tab title before a session exists', () => {
+    const rpc = vi.fn(() => Promise.resolve({}))
+    const ctx = buildCtx({ gateway: { ...buildGateway(), rpc } })
+
+    expect(createSlashHandler(ctx)('/name Research')).toBe(true)
+
+    expect(getUiState().tabTitle).toBe('Research')
+    expect(rpc).toHaveBeenCalledWith('config.set', { key: 'tui_tab_title', value: 'Research' })
+    expect(ctx.gateway.gw.request).not.toHaveBeenCalled()
+    expect(ctx.transcript.sys).toHaveBeenCalledWith('tab title set: Research')
+  })
+
+  it('/name reset clears the custom TUI tab title', () => {
+    patchUiState({ tabTitle: 'Research' })
+    const rpc = vi.fn(() => Promise.resolve({}))
+    const ctx = buildCtx({ gateway: { ...buildGateway(), rpc } })
+
+    expect(createSlashHandler(ctx)('/name reset')).toBe(true)
+
+    expect(getUiState().tabTitle).toBe('')
+    expect(rpc).toHaveBeenCalledWith('config.set', { key: 'tui_tab_title', value: '' })
+    expect(ctx.transcript.sys).toHaveBeenCalledWith('tab title reset to default')
   })
 })
 

@@ -16,8 +16,9 @@ describe('applyDisplay', () => {
     resetUiState()
   })
 
-  it('fans every display flag out to $uiState and the bell callback', () => {
+  it('fans every display flag out to $uiState and the display callbacks', () => {
     const setBell = vi.fn()
+    const setNotifyOnApproval = vi.fn()
 
     applyDisplay(
       {
@@ -26,6 +27,7 @@ describe('applyDisplay', () => {
             bell_on_complete: true,
             details_mode: 'expanded',
             inline_diffs: false,
+            notify_on_approval: true,
             show_cost: true,
             show_reasoning: true,
             streaming: false,
@@ -34,11 +36,15 @@ describe('applyDisplay', () => {
           }
         }
       },
-      setBell
+      setBell,
+      undefined,
+      undefined,
+      setNotifyOnApproval
     )
 
     const s = $uiState.get()
     expect(setBell).toHaveBeenCalledWith(true)
+    expect(setNotifyOnApproval).toHaveBeenCalledWith(true)
     expect(s.compact).toBe(true)
     expect(s.detailsMode).toBe('expanded')
     expect(s.inlineDiffs).toBe(false)
@@ -46,6 +52,60 @@ describe('applyDisplay', () => {
     expect(s.showReasoning).toBe(true)
     expect(s.statusBar).toBe('off')
     expect(s.streaming).toBe(false)
+  })
+
+  it('threads display.tui_tab_title into $uiState', () => {
+    const setBell = vi.fn()
+
+    applyDisplay({ config: { display: { tui_tab_title: '  Hermes Dev  ' } } }, setBell)
+
+    expect($uiState.get().tabTitle).toBe('Hermes Dev')
+  })
+
+  it('threads display.completion_notification_method through the setter', () => {
+    const setBell = vi.fn()
+    const setCompletionNotificationMethod = vi.fn()
+
+    applyDisplay(
+      { config: { display: { completion_notification_method: 'native' } } },
+      setBell,
+      undefined,
+      setCompletionNotificationMethod
+    )
+
+    expect(setCompletionNotificationMethod).toHaveBeenCalledWith('native')
+
+    applyDisplay(
+      { config: { display: { completion_notification_method: 'space-laser' } } },
+      setBell,
+      undefined,
+      setCompletionNotificationMethod
+    )
+
+    expect(setCompletionNotificationMethod).toHaveBeenLastCalledWith('auto')
+  })
+
+  it('threads display.notify_on_approval through the approval-notification setter', () => {
+    const setBell = vi.fn()
+    const setNotifyOnApproval = vi.fn()
+
+    applyDisplay(
+      { config: { display: { notify_on_approval: true } } },
+      setBell,
+      undefined,
+      undefined,
+      setNotifyOnApproval
+    )
+    expect(setNotifyOnApproval).toHaveBeenCalledWith(true)
+
+    applyDisplay(
+      { config: { display: { notify_on_approval: false } } },
+      setBell,
+      undefined,
+      undefined,
+      setNotifyOnApproval
+    )
+    expect(setNotifyOnApproval).toHaveBeenLastCalledWith(false)
   })
 
   it('coerces legacy true + "on" alias to top', () => {
@@ -412,6 +472,31 @@ describe('hydrateFullConfig', () => {
     expect(setVoiceRecordKey).toHaveBeenCalledWith(
       expect.objectContaining({ ch: 'o', mod: 'ctrl', raw: 'ctrl+o' })
     )
+    expect(setBell).toHaveBeenCalledWith(false)
+  })
+
+  it('re-applies completion_notification_method from a fresh config.get full response', async () => {
+    const gw = makeFakeGw({ config: { display: { completion_notification_method: 'osc9' } } })
+    const setBell = vi.fn()
+    const setCompletionNotificationMethod = vi.fn()
+    const setVoiceRecordKey = vi.fn()
+
+    await hydrateFullConfig(gw, setBell, setVoiceRecordKey, setCompletionNotificationMethod)
+
+    expect(setCompletionNotificationMethod).toHaveBeenCalledWith('osc9')
+    expect(setBell).toHaveBeenCalledWith(false)
+  })
+
+  it('re-applies notify_on_approval from a fresh config.get full response', async () => {
+    const gw = makeFakeGw({ config: { display: { notify_on_approval: true } } })
+    const setBell = vi.fn()
+    const setCompletionNotificationMethod = vi.fn()
+    const setNotifyOnApproval = vi.fn()
+    const setVoiceRecordKey = vi.fn()
+
+    await hydrateFullConfig(gw, setBell, setVoiceRecordKey, setCompletionNotificationMethod, setNotifyOnApproval)
+
+    expect(setNotifyOnApproval).toHaveBeenCalledWith(true)
     expect(setBell).toHaveBeenCalledWith(false)
   })
 
