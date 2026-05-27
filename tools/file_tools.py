@@ -18,6 +18,11 @@ from tools.file_operations import (
 from tools import file_state
 from agent.redact import redact_sensitive_text
 
+try:
+    from acp_adapter import filesystem as acp_filesystem
+except Exception:  # pragma: no cover - ACP extra may be unavailable in non-ACP installs
+    acp_filesystem = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 
@@ -575,6 +580,7 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
         # file hasn't been modified since, return a lightweight stub
         # instead of re-sending the same content.  Saves context tokens.
         resolved_str = str(_resolved)
+        acp_read_active = bool(acp_filesystem and acp_filesystem.acp_read_active())
         dedup_key = (resolved_str, offset, limit)
         with _read_tracker_lock:
             task_data = _read_tracker.setdefault(task_id, {
@@ -591,7 +597,7 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
                 task_data["read_timestamps"] = {}
             cached_mtime = task_data.get("dedup", {}).get(dedup_key)
 
-        if cached_mtime is not None:
+        if cached_mtime is not None and not acp_read_active:
             try:
                 current_mtime = os.path.getmtime(resolved_str)
                 if current_mtime == cached_mtime:
@@ -631,8 +637,13 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
                 pass  # stat failed — fall through to full read
 
         # ── Perform the read ──────────────────────────────────────────
-        file_ops = _get_file_ops(task_id)
-        result = file_ops.read_file(path, offset, limit)
+        # In ACP editor sessions, prefer the client's filesystem so reads see
+        # unsaved/dirty editor buffers. Non-ACP sessions and ACP clients that
+        # did not advertise fs/read_text_file fall back unchanged.
+        result = acp_filesystem.read_text_file(path, offset, limit) if acp_filesystem else None
+        if result is None:
+            file_ops = _get_file_ops(task_id)
+            result = file_ops.read_file(path, offset, limit)
         result_dict = result.to_dict()
 
         # ── Character-count guard ─────────────────────────────────────
@@ -914,8 +925,10 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
 
         if _resolved is None:
             stale_warning = _check_file_staleness(path, task_id)
-            file_ops = _get_file_ops(task_id)
-            result = file_ops.write_file(path, content)
+            result = acp_filesystem.write_text_file(path, content) if acp_filesystem else None
+            if result is None:
+                file_ops = _get_file_ops(task_id)
+                result = file_ops.write_file(path, content)
             result_dict = result.to_dict()
             if stale_warning:
                 result_dict["_warning"] = stale_warning
@@ -930,8 +943,10 @@ def write_file_tool(path: str, content: str, task_id: str = "default",
             # fire — its message names the sibling subagent.
             cross_warning = file_state.check_stale(task_id, _resolved)
             stale_warning = _check_file_staleness(path, task_id)
-            file_ops = _get_file_ops(task_id)
-            result = file_ops.write_file(path, content)
+            result = acp_filesystem.write_text_file(path, content) if acp_filesystem else None
+            if result is None:
+                file_ops = _get_file_ops(task_id)
+                result = file_ops.write_file(path, content)
             result_dict = result.to_dict()
             effective_warning = cross_warning or stale_warning
             if effective_warning:
@@ -1037,11 +1052,15 @@ def patch_tool(mode: str = "replace", path: str = None, old_string: str = None,
                     return tool_error("path required")
                 if old_string is None or new_string is None:
                     return tool_error("old_string and new_string required")
-                result = file_ops.patch_replace(path, old_string, new_string, replace_all)
+                result = acp_filesystem.patch_replace(path, old_string, new_string, replace_all) if acp_filesystem else None
+                if result is None:
+                    result = file_ops.patch_replace(path, old_string, new_string, replace_all)
             elif mode == "patch":
                 if not patch:
                     return tool_error("patch content required")
-                result = file_ops.patch_v4a(patch)
+                result = acp_filesystem.patch_v4a(patch) if acp_filesystem else None
+                if result is None:
+                    result = file_ops.patch_v4a(patch)
             else:
                 return tool_error(f"Unknown mode: {mode}")
 
