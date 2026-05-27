@@ -34,6 +34,22 @@ _AUDIO_EXTS = frozenset({'.ogg', '.opus', '.mp3', '.wav', '.m4a', '.flac'})
 _TELEGRAM_AUDIO_ATTACHMENT_EXTS = frozenset({'.mp3', '.m4a'})
 _TELEGRAM_VOICE_EXTS = frozenset({'.ogg', '.opus'})
 
+# When display.show_reasoning is enabled, gateway/run.py prepends final
+# responses with a visible reasoning block:
+#
+#   💭 **Reasoning:**
+#   ```
+#   ...
+#   ```
+#
+# The text transcript should keep that block, but auto-TTS should not speak it.
+# Strip only this Hermes-rendered leading block; do not scrub arbitrary
+# user/model text containing the word "reasoning" later in the answer.
+_DISPLAY_REASONING_TTS_PREFIX_RE = re.compile(
+    r"^\s*(?:💭\s*)?(?:\*\*)?Reasoning:(?:\*\*)?\s*\n+```[^\n`]*\n.*?\n```\s*",
+    re.IGNORECASE | re.DOTALL,
+)
+
 
 def _platform_name(platform) -> str:
     """Normalize a Platform enum / raw string into a lowercase name."""
@@ -2461,11 +2477,24 @@ class BasePlatformAdapter(ABC):
             text = f"{caption}\n{text}"
         return await self.send(chat_id=chat_id, content=text, reply_to=reply_to, metadata=metadata)
 
+    @staticmethod
+    def strip_display_reasoning_for_tts(text: str) -> str:
+        """Remove Hermes' visible reasoning prelude from auto-TTS text.
+
+        This preserves ``display.show_reasoning`` for the chat transcript while
+        preventing the gateway's voice reply from reading the debug/thinking
+        block aloud.  Only the exact leading fenced block emitted by
+        ``gateway.run`` is stripped; normal answer text is left untouched.
+        """
+        return _DISPLAY_REASONING_TTS_PREFIX_RE.sub("", text or "", count=1).strip()
+
     def prepare_tts_text(self, text: str) -> str:
         """Prepare text for TTS. Override to filter tool output, code, etc.
 
-        Default strips markdown formatting and truncates to 4000 chars.
+        Default removes Hermes' visible reasoning prelude, strips markdown
+        formatting, and truncates to 4000 chars.
         """
+        text = self.strip_display_reasoning_for_tts(text)
         return re.sub(r'[*_`#\[\]()]', '', text)[:4000].strip()
 
     async def play_tts(

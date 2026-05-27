@@ -11,6 +11,7 @@ from gateway.platforms.base import (
     GATEWAY_SECRET_CAPTURE_UNSUPPORTED_MESSAGE,
     MessageEvent,
     safe_url_for_log,
+    SendResult,
     utf16_len,
     _log_safe_path,
     _prefix_within_utf16_limit,
@@ -815,6 +816,74 @@ class TestShouldSendMediaAsAudio:
 
 
 # ---------------------------------------------------------------------------
+# prepare_tts_text
+# ---------------------------------------------------------------------------
+
+
+class TestPrepareTTSMessageText:
+    def _adapter(self):
+        """Create a minimal adapter instance for testing instance methods."""
+
+        class StubAdapter(BasePlatformAdapter):
+            async def connect(self):
+                return True
+
+            async def disconnect(self):
+                pass
+
+            async def send(self, *a, **kw):
+                return SendResult(success=True, message_id="test")
+
+            async def get_chat_info(self, chat_id):
+                return {}
+
+        from gateway.config import Platform, PlatformConfig
+
+        config = PlatformConfig(enabled=True, token="test")
+        return StubAdapter(config=config, platform=Platform.TELEGRAM)
+
+    def test_strip_display_reasoning_removes_leading_reasoning_block_only(self):
+        text = (
+            "💭 **Reasoning:**\n"
+            "```\n"
+            "The user asked a voice question.\n"
+            "_... (3 more lines)_\n"
+            "```\n\n"
+            "Yep — loud and clear."
+        )
+
+        assert (
+            BasePlatformAdapter.strip_display_reasoning_for_tts(text)
+            == "Yep — loud and clear."
+        )
+
+    def test_prepare_tts_text_keeps_visible_answer_but_not_reasoning(self):
+        adapter = self._adapter()
+        text = (
+            "💭 **Reasoning:**\n"
+            "```\n"
+            "Internal chain-of-thought should not be spoken.\n"
+            "```\n\n"
+            "**Final:** `ship it`."
+        )
+
+        spoken = adapter.prepare_tts_text(text)
+
+        assert "Reasoning" not in spoken
+        assert "chain-of-thought" not in spoken
+        assert spoken == "Final: ship it."
+
+    def test_prepare_tts_text_does_not_remove_reasoning_mentions_in_answer(self):
+        adapter = self._adapter()
+
+        spoken = adapter.prepare_tts_text(
+            "The reasoning is visible in text, but not duplicated in voice."
+        )
+
+        assert spoken == "The reasoning is visible in text, but not duplicated in voice."
+
+
+# ---------------------------------------------------------------------------
 # truncate_message
 # ---------------------------------------------------------------------------
 
@@ -831,9 +900,9 @@ class TestTruncateMessage:
                 pass
 
             async def send(self, *a, **kw):
-                pass
+                return SendResult(success=True, message_id="test")
 
-            async def get_chat_info(self, *a):
+            async def get_chat_info(self, chat_id):
                 return {}
 
         from gateway.config import Platform, PlatformConfig
