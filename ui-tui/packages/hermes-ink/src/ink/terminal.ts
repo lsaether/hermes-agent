@@ -172,6 +172,56 @@ export function needsAltScreenResizeScrollbackClear(env: NodeJS.ProcessEnv = pro
   return (env.TERM_PROGRAM ?? '').trim() === 'Apple_Terminal'
 }
 
+const TRUE_RE = /^(?:1|true|yes|on)$/i
+const FALSE_RE = /^(?:0|false|no|off)$/i
+
+function booleanOverride(value: string | undefined): boolean | undefined {
+  const normalized = (value ?? '').trim()
+
+  if (TRUE_RE.test(normalized)) {
+    return true
+  }
+
+  if (FALSE_RE.test(normalized)) {
+    return false
+  }
+
+  return undefined
+}
+
+function isGhostty(env: NodeJS.ProcessEnv = process.env): boolean {
+  return (env.TERM_PROGRAM ?? '').trim() === 'ghostty' || (env.TERM ?? '').trim() === 'xterm-ghostty'
+}
+
+/**
+ * True when it is safe to use DECSTBM + SU/SD hardware scrolling for
+ * ScrollBox wheel/page movement.
+ *
+ * The fast path is a byte-saver, not a correctness requirement: when disabled,
+ * log-update falls back to repainting shifted rows from the screen buffer.
+ * Ghostty's OpenGL renderer can leave truecolor cells looking faded/stale after
+ * region scrolls; selecting text forces a host repaint, which is why the colors
+ * "fix themselves" after highlight/unhighlight. Prefer the repaint path there
+ * until the terminal-side damage bug is gone. Users can force either behavior
+ * with HERMES_TUI_DECSTBM=1/0 for diagnostics.
+ */
+export function shouldUseDecstbmScrollOptimization(
+  env: NodeJS.ProcessEnv = process.env,
+  syncOutputSupported = SYNC_OUTPUT_SUPPORTED
+): boolean {
+  const explicit = booleanOverride(env.HERMES_TUI_DECSTBM)
+
+  if (explicit !== undefined) {
+    return explicit && syncOutputSupported
+  }
+
+  if (!syncOutputSupported) {
+    return false
+  }
+
+  return !isGhostty(env)
+}
+
 // Terminals known to correctly implement the Kitty keyboard protocol
 // (CSI >1u) and/or xterm modifyOtherKeys (CSI >4;2m) for ctrl+shift+<letter>
 // disambiguation. We previously enabled unconditionally (#23350), assuming
@@ -201,6 +251,7 @@ export function hasCursorUpViewportYankBug(): boolean {
 // Computed once at module load — terminal capabilities don't change mid-session.
 // Exported so callers can pass a sync-skip hint gated to specific modes.
 export const SYNC_OUTPUT_SUPPORTED = isSynchronizedOutputSupported()
+export const DECSTBM_SCROLL_OPTIMIZATION_SUPPORTED = shouldUseDecstbmScrollOptimization()
 
 export type Terminal = {
   stdout: Writable
