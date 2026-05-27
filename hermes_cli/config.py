@@ -1308,6 +1308,8 @@ DEFAULT_CONFIG = {
         "record_key": "ctrl+b",
         "max_recording_seconds": 120,
         "auto_tts": False,
+        "tts_style": "brief",         # CLI voice TTS: brief spoken summary; set "full" to read the full answer
+        "tts_brief_chars": 320,        # Target max chars for CLI brief spoken replies
         "beep_enabled": True,         # Play record start/stop beeps in CLI voice mode
         "silence_threshold": 200,     # RMS below this = silence (0-32767)
         "silence_duration": 3.0,      # Seconds of silence before auto-stop

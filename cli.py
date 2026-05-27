@@ -10919,19 +10919,9 @@ class HermesCLI:
             from tools.tts_tool import text_to_speech_tool
             from tools.voice_mode import play_audio_file
 
-            # Strip markdown and non-speech content for cleaner TTS
-            tts_text = text[:4000] if len(text) > 4000 else text
-            tts_text = re.sub(r'```[\s\S]*?```', ' ', tts_text)   # fenced code blocks
-            tts_text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', tts_text)  # [text](url) -> text
-            tts_text = re.sub(r'https?://\S+', '', tts_text)      # URLs
-            tts_text = re.sub(r'\*\*(.+?)\*\*', r'\1', tts_text)  # bold
-            tts_text = re.sub(r'\*(.+?)\*', r'\1', tts_text)      # italic
-            tts_text = re.sub(r'`(.+?)`', r'\1', tts_text)        # inline code
-            tts_text = re.sub(r'^#+\s*', '', tts_text, flags=re.MULTILINE)  # headers
-            tts_text = re.sub(r'^\s*[-*]\s+', '', tts_text, flags=re.MULTILINE)  # list items
-            tts_text = re.sub(r'---+', '', tts_text)              # horizontal rules
-            tts_text = re.sub(r'\n{3,}', '\n\n', tts_text)        # excessive newlines
-            tts_text = tts_text.strip()
+            # Strip markdown and, by default, speak a short brief while keeping
+            # the complete answer visible in the terminal.
+            tts_text = self._voice_prepare_tts_text(text)
             if not tts_text:
                 return
 
@@ -10995,6 +10985,90 @@ class HermesCLI:
         except Exception:
             pass
         return True
+
+    def _voice_config(self) -> dict:
+        """Return the voice config section, tolerating malformed config."""
+        try:
+            from hermes_cli.config import load_config
+            voice_cfg = load_config().get("voice", {})
+            if isinstance(voice_cfg, dict):
+                return voice_cfg
+        except Exception:
+            pass
+        return {}
+
+    def _voice_tts_style(self) -> str:
+        """Return CLI voice TTS style: ``brief`` by default, or ``full``."""
+        style = str(self._voice_config().get("tts_style", "brief")).strip().lower()
+        if style in {"brief", "full"}:
+            return style
+        return "brief"
+
+    def _voice_tts_brief_chars(self) -> int:
+        """Return the target max length for brief spoken CLI replies."""
+        raw = self._voice_config().get("tts_brief_chars", 320)
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = 320
+        return max(80, min(value, 1000))
+
+    def _voice_message_prefix(self) -> str:
+        """Instruction prepended only to voice-originated turns.
+
+        Keep the persisted conversation clean and preserve prompt caching by
+        applying this as an API-call-local user-message prefix, not a system
+        prompt mutation. TTS brevity is handled downstream so the terminal can
+        still receive a complete answer.
+        """
+        return (
+            "[Voice input — the user spoke this message. Write a complete "
+            "terminal answer when useful; do not artificially shorten the text "
+            "reply. If voice TTS is enabled, Hermes will generate a separate "
+            "short spoken brief.] "
+        )
+
+    def _voice_truncate_for_tts(self, text: str, max_chars: int) -> str:
+        """Truncate TTS text at a word boundary with an ellipsis."""
+        normalized = re.sub(r"\s+", " ", text).strip()
+        if len(normalized) <= max_chars:
+            return normalized
+        cut = normalized[:max_chars].rsplit(" ", 1)[0].rstrip(" ,;:-")
+        if not cut:
+            cut = normalized[:max_chars].rstrip(" ,;:-")
+        return f"{cut}…" if cut else ""
+
+    def _voice_brief_tts_text(self, text: str, max_chars: int) -> str:
+        """Build a short spoken brief from a complete terminal response."""
+        normalized = re.sub(r"\s+", " ", text).strip()
+        if len(normalized) <= max_chars:
+            return normalized
+
+        sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", normalized) if s.strip()]
+        selected: list[str] = []
+        for sentence in sentences:
+            candidate = " ".join([*selected, sentence]).strip()
+            if len(candidate) > max_chars:
+                break
+            selected.append(sentence)
+            if len(selected) >= 2:
+                break
+        if selected:
+            return " ".join(selected)
+        return self._voice_truncate_for_tts(normalized, max_chars)
+
+    def _voice_prepare_tts_text(self, text: str) -> str:
+        """Clean and optionally brief a CLI response before TTS playback."""
+        if not text:
+            return ""
+        from tools.tts_tool import _strip_markdown_for_tts
+
+        clean_text = _strip_markdown_for_tts(text)
+        if not clean_text:
+            return ""
+        if self._voice_tts_style() == "full":
+            return clean_text[:4000].strip()
+        return self._voice_brief_tts_text(clean_text, self._voice_tts_brief_chars())
 
     def _enable_voice_mode(self):
         """Enable voice mode after checking requirements."""
@@ -11257,7 +11331,6 @@ class HermesCLI:
         with self._approval_lock:
             timeout = int(CLI_CONFIG.get("approvals", {}).get("timeout", 60))
             response_queue = queue.Queue()
-
             self._approval_state = {
                 "command": command,
                 "description": description,
@@ -11720,7 +11793,7 @@ class HermesCLI:
             stream_callback = None
             stop_event = None
 
-            if self._voice_tts:
+            if self._voice_tts and self._voice_tts_style() == "full":
                 try:
                     from tools.tts_tool import (
                         _load_tts_config as _load_tts_cfg,
@@ -11770,14 +11843,11 @@ class HermesCLI:
                         text_queue.put(delta)
 
             # When voice mode is active, prepend a brief instruction so the
-            # model responds concisely. The prefix is API-call-local only —
-            # run_conversation persists the original clean user message.
+            # model knows the turn came from speech. The prefix is API-call-local
+            # only — run_conversation persists the original clean user message.
             _voice_prefix = ""
             if self._voice_mode and isinstance(message, str):
-                _voice_prefix = (
-                    "[Voice input — respond concisely and conversationally, "
-                    "2-3 sentences max. No code blocks or markdown.] "
-                )
+                _voice_prefix = self._voice_message_prefix()
 
             def run_agent():
                 nonlocal result
@@ -11792,7 +11862,7 @@ class HermesCLI:
                     set_secret_capture_callback(self._secret_capture_callback)
                 except Exception:
                     pass
-                agent_message = _voice_prefix + message if _voice_prefix else message
+                agent_message = f"{_voice_prefix}{message}" if (_voice_prefix and isinstance(message, str)) else message
                 # Prepend pending model switch note so the model knows about the switch
                 _msn = getattr(self, '_pending_model_switch_note', None)
                 if _msn:

@@ -939,14 +939,49 @@ def _generate_elevenlabs(text: str, output_path: str, tts_config: Dict[str, Any]
     else:
         output_format = "mp3_44100_128"
 
+    voice_settings = None
+    _voice_setting_values: Dict[str, Any] = {}
+    for _key in ("stability", "similarity_boost", "style"):
+        if _key in el_config:
+            try:
+                _voice_setting_values[_key] = float(el_config[_key])
+            except (TypeError, ValueError):
+                logger.warning("Ignoring invalid ElevenLabs %s setting: %r", _key, el_config[_key])
+    if "use_speaker_boost" in el_config:
+        _voice_setting_values["use_speaker_boost"] = bool(el_config["use_speaker_boost"])
+    _speed_raw = el_config.get("speed", tts_config.get("speed", 1.0))
+    try:
+        speed = float(_speed_raw)
+    except (TypeError, ValueError):
+        speed = 1.0
+        logger.warning("Ignoring invalid ElevenLabs speed setting: %r", _speed_raw)
+    if speed != 1.0:
+        # ElevenLabs voice_settings.speed accepts a narrower practical range
+        # than OpenAI's TTS speed knob. Clamp gently so config typos don't
+        # make requests fail while still allowing "a tad faster/slower" tweaks.
+        _voice_setting_values["speed"] = max(0.7, min(1.2, speed))
+    if _voice_setting_values:
+        try:
+            from elevenlabs.types.voice_settings import VoiceSettings
+            voice_settings = VoiceSettings(**_voice_setting_values)
+        except Exception as e:
+            # Keep tests and lightweight installs from needing the optional SDK's
+            # generated VoiceSettings type. The ElevenLabs client accepts the
+            # same JSON-shaped voice_settings payload.
+            logger.debug("Using raw ElevenLabs voice settings payload: %s", e)
+            voice_settings = dict(_voice_setting_values)
+
     ElevenLabs = _import_elevenlabs()
     client = ElevenLabs(api_key=api_key)
-    audio_generator = client.text_to_speech.convert(
-        text=text,
-        voice_id=voice_id,
-        model_id=model_id,
-        output_format=output_format,
-    )
+    convert_kwargs = {
+        "text": text,
+        "voice_id": voice_id,
+        "model_id": model_id,
+        "output_format": output_format,
+    }
+    if voice_settings is not None:
+        convert_kwargs["voice_settings"] = voice_settings
+    audio_generator = client.text_to_speech.convert(**convert_kwargs)
 
     # audio_generator yields chunks -- write them all
     with open(output_path, "wb") as f:

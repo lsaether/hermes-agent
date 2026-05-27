@@ -306,47 +306,40 @@ class TestVoiceMessagePrefix:
     def test_prefix_added_when_voice_mode_active(self):
         """When voice mode is active and message is str, agent_message
         should have the voice instruction prefix."""
+        cli = _make_voice_cli(_voice_mode=True)
         voice_mode = True
         message = "What's the weather like?"
 
         agent_message = message
         if voice_mode and isinstance(message, str):
-            agent_message = (
-                "[Voice input — respond concisely and conversationally, "
-                "2-3 sentences max. No code blocks or markdown.] "
-                + message
-            )
+            agent_message = cli._voice_message_prefix() + message
 
         assert agent_message.startswith("[Voice input")
+        assert "complete terminal answer" in agent_message
+        assert "2-3 sentences max" not in agent_message
         assert "What's the weather like?" in agent_message
 
     def test_no_prefix_when_voice_mode_inactive(self):
         """When voice mode is off, message passes through unchanged."""
+        cli = _make_voice_cli(_voice_mode=False)
         voice_mode = False
         message = "What's the weather like?"
 
         agent_message = message
         if voice_mode and isinstance(message, str):
-            agent_message = (
-                "[Voice input — respond concisely and conversationally, "
-                "2-3 sentences max. No code blocks or markdown.] "
-                + message
-            )
+            agent_message = cli._voice_message_prefix() + message
 
         assert agent_message == message
 
     def test_no_prefix_for_multimodal_content(self):
         """When message is a list (multimodal), no prefix is added."""
+        cli = _make_voice_cli(_voice_mode=True)
         voice_mode = True
         message = [{"type": "text", "text": "describe this"}, {"type": "image_url"}]
 
         agent_message = message
         if voice_mode and isinstance(message, str):
-            agent_message = (
-                "[Voice input — respond concisely and conversationally, "
-                "2-3 sentences max. No code blocks or markdown.] "
-                + message
-            )
+            agent_message = cli._voice_message_prefix() + message
 
         assert agent_message is message
 
@@ -356,19 +349,17 @@ class TestVoiceMessagePrefix:
         voice_mode = True
         message = "Hello there"
         conversation_history = []
+        cli = _make_voice_cli(_voice_mode=True)
 
         conversation_history.append({"role": "user", "content": message})
 
         agent_message = message
         if voice_mode and isinstance(message, str):
-            agent_message = (
-                "[Voice input — respond concisely and conversationally, "
-                "2-3 sentences max. No code blocks or markdown.] "
-                + message
-            )
+            agent_message = cli._voice_message_prefix() + message
 
         assert conversation_history[-1]["content"] == "Hello there"
         assert agent_message.startswith("[Voice input")
+        assert "complete terminal answer" in agent_message
         assert agent_message != conversation_history[-1]["content"]
 
     def test_enable_voice_mode_does_not_modify_system_prompt(self):
@@ -1042,6 +1033,39 @@ class TestDisableVoiceModeReal:
 
 class TestVoiceSpeakResponseReal:
     """Tests _voice_speak_response with real CLI instance."""
+
+    @patch("hermes_cli.config.load_config", return_value={"voice": {}})
+    def test_default_tts_style_is_brief(self, _cfg):
+        cli = _make_voice_cli(_voice_tts=True)
+        assert cli._voice_tts_style() == "brief"
+
+    @patch("hermes_cli.config.load_config", return_value={"voice": {"tts_style": "brief", "tts_brief_chars": 80}})
+    def test_brief_tts_uses_opening_summary_not_full_terminal_answer(self, _cfg):
+        cli = _make_voice_cli(_voice_tts=True)
+        spoken = cli._voice_prepare_tts_text(
+            "This is the spoken summary. "
+            "Here are detailed implementation notes that should remain in the terminal text "
+            "instead of being read aloud in full."
+        )
+
+        assert spoken == "This is the spoken summary."
+
+    @patch("hermes_cli.config.load_config", return_value={"voice": {"tts_style": "full"}})
+    def test_full_tts_style_keeps_complete_cleaned_response(self, _cfg):
+        cli = _make_voice_cli(_voice_tts=True)
+        spoken = cli._voice_prepare_tts_text(
+            "This is the spoken summary. "
+            "Here are detailed implementation notes that should also be spoken in full style."
+        )
+
+        assert "detailed implementation notes" in spoken
+
+    def test_voice_message_prefix_preserves_full_terminal_answer(self):
+        cli = _make_voice_cli(_voice_mode=True)
+        prefix = cli._voice_message_prefix()
+
+        assert "2-3 sentences" not in prefix
+        assert "complete terminal answer" in prefix
 
     def test_async_scheduling_clears_done_before_thread_start(self):
         cli = _make_voice_cli(_voice_tts=True)
