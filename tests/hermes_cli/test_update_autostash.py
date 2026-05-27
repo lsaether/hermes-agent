@@ -85,7 +85,7 @@ def test_restore_stashed_changes_prompts_before_applying(monkeypatch, tmp_path, 
     restored = hermes_main._restore_stashed_changes(["git"], tmp_path, "abc123", prompt_user=True)
 
     assert restored is True
-    assert calls[0][0] == ["git", "stash", "apply", "abc123"]
+    assert calls[0][0] == ["git", "stash", "apply", "--index", "abc123"]
     assert calls[1][0] == ["git", "diff", "--name-only", "--diff-filter=U"]
     assert calls[2][0] == ["git", "stash", "list", "--format=%gd %H"]
     assert calls[3][0] == ["git", "stash", "drop", "stash@{1}"]
@@ -113,7 +113,7 @@ def test_restore_stashed_changes_can_skip_restore_and_keep_stash(monkeypatch, tm
     out = capsys.readouterr().out
     assert "Restore local changes now? [Y/n]" in out
     assert "Your changes are still preserved in git stash." in out
-    assert "git stash apply abc123" in out
+    assert "git stash apply --index abc123" in out
 
 
 def test_restore_stashed_changes_applies_without_prompt_when_disabled(monkeypatch, tmp_path, capsys):
@@ -136,7 +136,7 @@ def test_restore_stashed_changes_applies_without_prompt_when_disabled(monkeypatc
     restored = hermes_main._restore_stashed_changes(["git"], tmp_path, "abc123", prompt_user=False)
 
     assert restored is True
-    assert calls[0][0] == ["git", "stash", "apply", "abc123"]
+    assert calls[0][0] == ["git", "stash", "apply", "--index", "abc123"]
     assert calls[1][0] == ["git", "diff", "--name-only", "--diff-filter=U"]
     assert calls[2][0] == ["git", "stash", "list", "--format=%gd %H"]
     assert calls[3][0] == ["git", "stash", "drop", "stash@{0}"]
@@ -172,7 +172,7 @@ def test_restore_stashed_changes_keeps_going_when_stash_entry_cannot_be_resolved
     restored = hermes_main._restore_stashed_changes(["git"], tmp_path, "abc123", prompt_user=False)
 
     assert restored is True
-    assert calls[0] == (["git", "stash", "apply", "abc123"], {"cwd": tmp_path, "capture_output": True, "text": True})
+    assert calls[0] == (["git", "stash", "apply", "--index", "abc123"], {"cwd": tmp_path, "capture_output": True, "text": True})
     assert calls[1] == (["git", "diff", "--name-only", "--diff-filter=U"], {"cwd": tmp_path, "capture_output": True, "text": True})
     assert calls[2] == (["git", "stash", "list", "--format=%gd %H"], {"cwd": tmp_path, "capture_output": True, "text": True, "check": True})
     out = capsys.readouterr().out
@@ -242,7 +242,7 @@ def test_restore_stashed_changes_always_resets_on_conflict(monkeypatch, tmp_path
     assert "hermes_cli/main.py" in out
     assert "stashed changes are preserved" in out
     assert "Working tree reset to clean state" in out
-    assert "git stash apply abc123" in out
+    assert "git stash apply --index abc123" in out
     reset_calls = [c for c, _ in calls if c[1:3] == ["reset", "--hard"]]
     assert len(reset_calls) == 1
 
@@ -325,6 +325,10 @@ def test_cmd_update_retries_optional_extras_individually_when_all_fails(monkeypa
             return SimpleNamespace(stdout="main\n", stderr="", returncode=0)
         if cmd == ["git", "rev-list", "HEAD..origin/main", "--count"]:
             return SimpleNamespace(stdout="1\n", stderr="", returncode=0)
+        if cmd == ["git", "rev-parse", "HEAD"]:
+            return SimpleNamespace(stdout="oldhead\n", stderr="", returncode=0)
+        if cmd == ["git", "rev-list", "--left-right", "--count", "origin/main...HEAD"]:
+            return SimpleNamespace(stdout="1\t0\n", stderr="", returncode=0)
         if cmd == ["git", "pull", "--ff-only", "origin", "main"]:
             return SimpleNamespace(stdout="Updating\n", stderr="", returncode=0)
         if cmd == ["/usr/bin/uv", "pip", "install", "-e", ".[all]"]:
@@ -374,6 +378,10 @@ def test_cmd_update_succeeds_with_extras(monkeypatch, tmp_path):
             return SimpleNamespace(stdout="main\n", stderr="", returncode=0)
         if cmd == ["git", "rev-list", "HEAD..origin/main", "--count"]:
             return SimpleNamespace(stdout="1\n", stderr="", returncode=0)
+        if cmd == ["git", "rev-parse", "HEAD"]:
+            return SimpleNamespace(stdout="oldhead\n", stderr="", returncode=0)
+        if cmd == ["git", "rev-list", "--left-right", "--count", "origin/main...HEAD"]:
+            return SimpleNamespace(stdout="1\t0\n", stderr="", returncode=0)
         if cmd == ["git", "pull", "--ff-only", "origin", "main"]:
             return SimpleNamespace(stdout="Updating\n", stderr="", returncode=0)
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -459,8 +467,12 @@ def _make_update_side_effect(
             return SimpleNamespace(stdout="", stderr="", returncode=0)
         if "rev-parse" in joined and "--abbrev-ref" in joined:
             return SimpleNamespace(stdout=f"{current_branch}\n", stderr="", returncode=0)
+        if cmd == ["git", "rev-parse", "HEAD"]:
+            return SimpleNamespace(stdout="oldhead\n", stderr="", returncode=0)
         if "checkout" in joined and "main" in joined:
             return SimpleNamespace(stdout="", stderr="", returncode=0)
+        if cmd == ["git", "rev-list", "--left-right", "--count", "origin/main...HEAD"]:
+            return SimpleNamespace(stdout=f"{commit_count}\t0\n", stderr="", returncode=0)
         if "rev-list" in joined:
             return SimpleNamespace(stdout=f"{commit_count}\n", stderr="", returncode=0)
         if "--ff-only" in joined:
@@ -480,22 +492,47 @@ def _make_update_side_effect(
     return side_effect, recorded
 
 
-def test_cmd_update_falls_back_to_reset_when_ff_only_fails(monkeypatch, tmp_path, capsys):
-    """When --ff-only fails (diverged history), update resets to origin/{branch}."""
+def test_cmd_update_rebases_local_commits_instead_of_resetting(monkeypatch, tmp_path, capsys):
+    """Diverged history with local commits is rebased, not reset to origin/main."""
     _setup_update_mocks(monkeypatch, tmp_path)
     monkeypatch.setattr("shutil.which", lambda name: "/usr/bin/uv" if name == "uv" else None)
 
-    side_effect, recorded = _make_update_side_effect(ff_only_fails=True)
-    monkeypatch.setattr(hermes_main.subprocess, "run", side_effect)
+    recorded = []
+
+    def fake_run(cmd, **kwargs):
+        recorded.append(cmd)
+        joined = " ".join(str(c) for c in cmd)
+        if cmd == ["git", "fetch", "origin"]:
+            return SimpleNamespace(stdout="", stderr="", returncode=0)
+        if cmd == ["git", "rev-parse", "--abbrev-ref", "HEAD"]:
+            return SimpleNamespace(stdout="main\n", stderr="", returncode=0)
+        if cmd == ["git", "rev-list", "HEAD..origin/main", "--count"]:
+            return SimpleNamespace(stdout="1\n", stderr="", returncode=0)
+        if cmd == ["git", "rev-parse", "HEAD"]:
+            return SimpleNamespace(stdout="oldhead\n", stderr="", returncode=0)
+        if cmd == ["git", "rev-list", "--left-right", "--count", "origin/main...HEAD"]:
+            return SimpleNamespace(stdout="1\t1\n", stderr="", returncode=0)
+        if cmd[1:4] == ["show-ref", "--verify", "--quiet"]:
+            return SimpleNamespace(stdout="", stderr="", returncode=1)
+        if cmd[1] == "branch" and cmd[2].startswith("backup/main-pre-update-"):
+            return SimpleNamespace(stdout="", stderr="", returncode=0)
+        if cmd == ["git", "rebase", "origin/main"]:
+            return SimpleNamespace(stdout="Successfully rebased\n", stderr="", returncode=0)
+        # A regression to the old destructive behavior would hit this path.
+        if cmd == ["git", "reset", "--hard", "origin/main"]:
+            return SimpleNamespace(stdout="HEAD is now at origin\n", stderr="", returncode=0)
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(hermes_main.subprocess, "run", fake_run)
 
     hermes_main.cmd_update(SimpleNamespace())
 
-    reset_calls = [c for c in recorded if "reset" in c and "--hard" in c]
-    assert len(reset_calls) == 1
-    assert reset_calls[0] == ["git", "reset", "--hard", "origin/main"]
+    assert [c for c in recorded if c == ["git", "rebase", "origin/main"]]
+    assert not [c for c in recorded if c == ["git", "reset", "--hard", "origin/main"]]
 
     out = capsys.readouterr().out
-    assert "Fast-forward not possible" in out
+    assert "Local commit stack detected" in out
+    assert "Rebased local commits successfully" in out
 
 
 def test_cmd_update_no_reset_when_ff_only_succeeds(monkeypatch, tmp_path):

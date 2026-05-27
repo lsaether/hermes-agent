@@ -6317,7 +6317,7 @@ def _capture_head_sha(git_cmd, cwd) -> str | None:
 
 
 def _validate_critical_files_syntax(root) -> tuple[bool, str | None, str | None]:
-    """Compile each file in ``_UPDATE_CRITICAL_FILES`` to catch SyntaxErrors.
+    """Parse each file in ``_UPDATE_CRITICAL_FILES`` to catch SyntaxErrors.
 
     These are the files imported on every ``hermes`` startup; if any of them
     has a syntax error (orphan merge-conflict markers, bad ref to a name
@@ -6325,36 +6325,28 @@ def _validate_critical_files_syntax(root) -> tuple[bool, str | None, str | None]
     them after a successful ``git pull`` so we can auto-roll-back instead of
     leaving the user with a bricked install.
 
-    The compiled ``.pyc`` is written to a temp directory rather than the
-    source tree's ``__pycache__/`` so we don't race with concurrent test
-    workers that walk the same dir, and so we don't leave a stale pyc
-    behind in production if the next interpreter run picks a different
-    Python version. The pyc is discarded on function return either way —
-    we only care about the compile-or-not signal.
+    The guard intentionally compiles source in memory instead of writing
+    ``__pycache__`` files. ``py_compile.compile()`` writes bytecode by default,
+    which can race under parallel tests or concurrent update attempts and turn
+    a healthy checkout into a false negative.
 
     Returns ``(ok, failing_path, error_message)``. ``ok=True`` means every
     file parsed cleanly.
     """
-    import py_compile
-    import tempfile
-
     root = Path(root)
-    with tempfile.TemporaryDirectory(prefix="hermes-syntax-check-") as tmpdir:
-        for relpath in _UPDATE_CRITICAL_FILES:
-            path = root / relpath
-            if not path.exists():
-                # Missing file is suspicious but not necessarily fatal — a future
-                # refactor may legitimately remove one of these. Skip and move on.
-                continue
-            # Mirror the relative path under the tmpdir so two different
-            # files with the same basename don't collide on the cfile name.
-            cfile = Path(tmpdir) / (relpath.replace("/", "__") + "c")
-            try:
-                py_compile.compile(str(path), cfile=str(cfile), doraise=True)
-            except py_compile.PyCompileError as exc:
-                return False, str(path), str(exc)
-            except OSError as exc:
-                return False, str(path), f"could not read: {exc}"
+    for relpath in _UPDATE_CRITICAL_FILES:
+        path = root / relpath
+        if not path.exists():
+            # Missing file is suspicious but not necessarily fatal — a future
+            # refactor may legitimately remove one of these. Skip and move on.
+            continue
+        try:
+            source = path.read_text(encoding="utf-8")
+            compile(source, str(path), "exec")
+        except SyntaxError as exc:
+            return False, str(path), str(exc)
+        except OSError as exc:
+            return False, str(path), f"could not read: {exc}"
     return True, None, None
 
 
@@ -7200,12 +7192,12 @@ def _restore_stashed_changes(
         if response not in {"", "y", "yes"}:
             print("Skipped restoring local changes.")
             print("Your changes are still preserved in git stash.")
-            print(f"Restore manually with: git stash apply {stash_ref}")
+            print(f"Restore manually with: git stash apply --index {stash_ref}")
             return False
 
     print("→ Restoring local changes...")
     restore = subprocess.run(
-        git_cmd + ["stash", "apply", stash_ref],
+        git_cmd + ["stash", "apply", "--index", stash_ref],
         cwd=cwd,
         capture_output=True,
         text=True,
@@ -7246,7 +7238,7 @@ def _restore_stashed_changes(
             capture_output=True,
         )
         print("Working tree reset to clean state.")
-        print(f"Restore your changes later with: git stash apply {stash_ref}")
+        print(f"Restore your changes later with: git stash apply --index {stash_ref}")
         # Don't sys.exit — the code update itself succeeded, only the stash
         # restore had conflicts.  Let cmd_update continue with pip install,
         # skill sync, and gateway restart.
@@ -8966,7 +8958,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
             # Never let a snapshot failure block an update.
             logger.debug("Pre-update snapshot failed: %s", exc)
 
-        print("→ Pulling updates...")
+        print("→ Applying git update...")
         update_succeeded = False
         # Capture the pre-pull SHA so we can auto-roll-back if the new code
         # has a syntax error in a critical-path file (PR #28452 incident:
@@ -8975,33 +8967,21 @@ def _cmd_update_impl(args, gateway_mode: bool):
         # the bad commit and the fix landing).
         pre_pull_sha = _capture_head_sha(git_cmd, PROJECT_ROOT)
         try:
-            pull_result = subprocess.run(
-                git_cmd + ["pull", "--ff-only", "origin", branch],
-                cwd=PROJECT_ROOT,
-                capture_output=True,
-                text=True,
+            from hermes_cli.git_update import (
+                GitUpdateError,
+                update_checkout_preserving_local_commits,
             )
-            if pull_result.returncode != 0:
-                # ff-only failed — local and remote have diverged (e.g. upstream
-                # force-pushed or rebase).  Since local changes are already
-                # stashed, reset to match the remote exactly.
-                print(
-                    "  ⚠ Fast-forward not possible (history diverged), resetting to match remote..."
+
+            try:
+                update_checkout_preserving_local_commits(
+                    git_cmd,
+                    PROJECT_ROOT,
+                    branch=branch,
+                    upstream_ref=f"origin/{branch}",
                 )
-                reset_result = subprocess.run(
-                    git_cmd + ["reset", "--hard", f"origin/{branch}"],
-                    cwd=PROJECT_ROOT,
-                    capture_output=True,
-                    text=True,
-                )
-                if reset_result.returncode != 0:
-                    print(f"✗ Failed to reset to origin/{branch}.")
-                    if reset_result.stderr.strip():
-                        print(f"  {reset_result.stderr.strip()}")
-                    print(
-                        f"  Try manually: git fetch origin && git reset --hard origin/{branch}"
-                    )
-                    sys.exit(1)
+            except GitUpdateError as exc:
+                print(str(exc))
+                sys.exit(1)
 
             # Post-pull syntax guard: validate critical-path files actually
             # parse before declaring the update successful. If a bad commit
@@ -9043,7 +9023,6 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     print("  Could not capture pre-pull SHA — recover manually with:")
                     print(f"    cd {PROJECT_ROOT} && git reflog && git reset --hard <prev-sha>")
                 sys.exit(1)
-
             update_succeeded = True
         finally:
             if auto_stash_ref is not None:
@@ -9053,7 +9032,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
                     print(
                         f"  ℹ️  Local changes preserved in stash (ref: {auto_stash_ref})"
                     )
-                    print(f"  Restore manually with: git stash apply")
+                    print(f"  Restore manually with: git stash apply --index")
                 else:
                     _restore_stashed_changes(
                         git_cmd,

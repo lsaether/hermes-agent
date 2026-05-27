@@ -24,6 +24,10 @@ def _make_run_side_effect(branch="main", verify_ok=True, commit_count="0"):
             rc = 0 if verify_ok else 128
             return subprocess.CompletedProcess(cmd, rc, stdout="", stderr="")
 
+        # git rev-list --left-right --count origin/main...HEAD
+        if "rev-list" in joined and "--left-right" in joined:
+            return subprocess.CompletedProcess(cmd, 0, stdout=f"{commit_count}\t0\n", stderr="")
+
         # git rev-list HEAD..origin/{branch} --count
         if "rev-list" in joined:
             return subprocess.CompletedProcess(cmd, 0, stdout=f"{commit_count}\n", stderr="")
@@ -55,11 +59,12 @@ class TestCmdUpdateBranchFallback:
 
         commands = [" ".join(str(a) for a in c.args[0]) for c in mock_run.call_args_list]
 
-        # rev-list should use origin/main, not origin/fix/stoicneko
+        # Both the initial update count and the helper's divergence check should
+        # use origin/main, not origin/fix/stoicneko.
         rev_list_cmds = [c for c in commands if "rev-list" in c]
-        assert len(rev_list_cmds) == 1
-        assert "origin/main" in rev_list_cmds[0]
-        assert "origin/fix/stoicneko" not in rev_list_cmds[0]
+        assert len(rev_list_cmds) == 2
+        assert all("origin/main" in c for c in rev_list_cmds)
+        assert all("origin/fix/stoicneko" not in c for c in rev_list_cmds)
 
         # pull should use main, not fix/stoicneko
         pull_cmds = [c for c in commands if "pull" in c]
@@ -80,8 +85,8 @@ class TestCmdUpdateBranchFallback:
         commands = [" ".join(str(a) for a in c.args[0]) for c in mock_run.call_args_list]
 
         rev_list_cmds = [c for c in commands if "rev-list" in c]
-        assert len(rev_list_cmds) == 1
-        assert "origin/main" in rev_list_cmds[0]
+        assert len(rev_list_cmds) == 2
+        assert all("origin/main" in c for c in rev_list_cmds)
 
         pull_cmds = [c for c in commands if "pull" in c]
         assert len(pull_cmds) == 1
@@ -310,6 +315,12 @@ class TestCmdUpdateBranchFlag:
                 rc = 128 if checkout_fails else 0
                 err = f"error: pathspec '{target_branch}' did not match\n" if checkout_fails else ""
                 return subprocess.CompletedProcess(cmd, rc, stdout="", stderr=err)
+
+            if "rev-list" in joined and "--left-right" in joined and "--count" in joined:
+                # The local rebase-aware updater asks for upstream/local divergence.
+                # These branch-flag tests model the simple fast-forward case:
+                # origin/<branch> is ahead by commit_count and local has no extra commits.
+                return subprocess.CompletedProcess(cmd, 0, stdout=f"{commit_count}\t0\n", stderr="")
 
             if "rev-list" in joined:
                 return subprocess.CompletedProcess(cmd, 0, stdout=f"{commit_count}\n", stderr="")
