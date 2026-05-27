@@ -586,7 +586,7 @@ def _start_agent_build(sid: str, session: dict) -> None:
             _sessions[sid]["_notif_stop"] = _start_notification_poller(sid, _sessions[sid])
             _notify_session_boundary("on_session_reset", key)
 
-            info = _session_info(agent)
+            info = _session_info_for(agent, key, current.get("pending_title"))
             warn = _probe_credentials(agent)
             if warn:
                 info["credential_warning"] = warn
@@ -1174,7 +1174,7 @@ def _apply_model_switch(sid: str, session: dict, raw_input: str) -> dict:
             api_mode=result.api_mode,
         )
         _restart_slash_worker(session)
-        _emit("session.info", sid, _session_info(agent))
+        _emit("session.info", sid, _session_info_for(agent, session.get("session_key")))
 
     os.environ["HERMES_MODEL"] = result.new_model
     os.environ["HERMES_INFERENCE_MODEL"] = result.new_model
@@ -1424,7 +1424,9 @@ def _current_profile_name() -> str:
         return "default"
 
 
-def _session_info(agent) -> dict:
+def _session_info(
+    agent, session_key: str | None = None, title_fallback: str | None = None
+) -> dict:
     reasoning_config = getattr(agent, "reasoning_config", None)
     reasoning_effort = ""
     if (
@@ -1489,7 +1491,32 @@ def _session_info(agent) -> dict:
         info["update_command"] = recommended_update_command()
     except Exception:
         pass
+    title = ""
+    if session_key:
+        try:
+            db = _get_db()
+            title = (db.get_session_title(session_key) if db is not None else "") or ""
+        except Exception:
+            pass
+    if not title and title_fallback:
+        title = title_fallback
+    if title.strip():
+        info["title"] = title.strip()
     return info
+
+
+def _session_info_for(
+    agent, session_key: str | None = None, title_fallback: str | None = None
+) -> dict:
+    """Build session info while tolerating tests that monkeypatch _session_info."""
+    try:
+        import inspect
+
+        if len(inspect.signature(_session_info).parameters) <= 1:
+            return _session_info(agent)
+    except (TypeError, ValueError):
+        pass
+    return _session_info(agent, session_key, title_fallback)
 
 
 def _tool_ctx(name: str, args: dict) -> str:
@@ -1909,7 +1936,7 @@ def _apply_personality_to_session(
         with session["history_lock"]:
             session["history"].append({"role": "user", "content": marker})
             session["history_version"] = int(session.get("history_version", 0)) + 1
-        info = _session_info(agent)
+        info = _session_info_for(agent, session.get("session_key"))
         _emit("session.info", sid, info)
         return False, info
     return False, None
@@ -1995,7 +2022,7 @@ def _reset_session_agent(sid: str, session: dict) -> dict:
     with session["history_lock"]:
         session["history"] = []
         session["history_version"] = int(session.get("history_version", 0)) + 1
-    info = _session_info(new_agent)
+    info = _session_info_for(new_agent, session["session_key"])
     _emit("session.info", sid, info)
     _restart_slash_worker(session)
     return info
@@ -2112,7 +2139,7 @@ def _init_session(sid: str, key: str, agent, history: list, cols: int = 80):
     _wire_callbacks(sid)
     _sessions[sid]["_notif_stop"] = _start_notification_poller(sid, _sessions[sid])
     _notify_session_boundary("on_session_reset", key)
-    _emit("session.info", sid, _session_info(agent))
+    _emit("session.info", sid, _session_info_for(agent, key, _sessions[sid].get("pending_title")))
 
 
 def _new_session_key() -> str:
@@ -2454,11 +2481,25 @@ def _(rid, params: dict) -> dict:
         return _db_unavailable_error(rid, code=5000)
     found = db.get_session(target)
     if not found:
-        found = db.get_session_by_title(target)
-        if found:
-            target = found["id"]
-        else:
+        resolved_id = db.resolve_session_by_title(target)
+        if not resolved_id:
             return _err(rid, 4007, "session not found")
+        target = str(resolved_id)
+        found = db.get_session(target)
+        if not found:
+            return _err(rid, 4007, "session not found")
+
+    try:
+        resolved_target = db.resolve_resume_session_id(target)
+    except Exception:
+        logger.exception("session.resume continuation resolution failed for %r", target)
+        resolved_target = target
+    if resolved_target and resolved_target != target:
+        target = str(resolved_target)
+        found = db.get_session(target)
+        if not found:
+            return _err(rid, 4007, "session not found")
+
     sid = uuid.uuid4().hex[:8]
     _enable_gateway_prompts()
     try:
@@ -2483,7 +2524,7 @@ def _(rid, params: dict) -> dict:
             "resumed": target,
             "message_count": len(messages),
             "messages": messages,
-            "info": _session_info(agent),
+            "info": _session_info_for(agent, target),
         },
     )
 
@@ -2672,6 +2713,12 @@ def _(rid, params: dict) -> dict:
     if db is None:
         return _db_unavailable_error(rid, code=5007)
     key = session["session_key"]
+
+    def _emit_title_info() -> None:
+        agent = session.get("agent")
+        if agent is not None:
+            _emit("session.info", params.get("session_id", ""), _session_info_for(agent, key))
+
     if "title" not in params:
         fallback = session.get("pending_title") or ""
         try:
@@ -2692,6 +2739,8 @@ def _(rid, params: dict) -> dict:
                 session["pending_title"] = None
         except Exception:
             resolved_title = fallback
+        if resolved_title:
+            _emit_title_info()
         return _ok(
             rid,
             {
@@ -2705,12 +2754,14 @@ def _(rid, params: dict) -> dict:
     try:
         if db.set_session_title(key, title):
             session["pending_title"] = None
+            _emit_title_info()
             return _ok(rid, {"pending": False, "title": title})
         # rowcount == 0 can mean "same value" as well as "missing row".
         # Queue only when the session row truly does not exist yet.
         existing_row = db.get_session(key)
         if existing_row:
             session["pending_title"] = None
+            _emit_title_info()
             return _ok(
                 rid,
                 {
@@ -2920,7 +2971,7 @@ def _(rid, params: dict) -> dict:
             summary = summarize_manual_compression(
                 before_messages, messages, before_tokens, after_tokens
             )
-            info = _session_info(agent)
+            info = _session_info_for(agent, session["session_key"] if session is not None else None)
             _emit("session.info", sid, info)
             return _ok(
                 rid,
@@ -3732,6 +3783,9 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                     try:
                         if _pdb.set_session_title(_session_key, _pending):
                             session["pending_title"] = None
+                            current_agent = session.get("agent")
+                            if current_agent is not None:
+                                _emit("session.info", sid, _session_info_for(current_agent, _session_key))
                     except ValueError as exc:
                         # Invalid/duplicate title — non-retryable, drop it.
                         # Auto-title will take over. Fix for #19029.
@@ -3754,12 +3808,24 @@ def _run_prompt_submit(rid, sid: str, session: dict, text: Any) -> None:
                 try:
                     from agent.title_generator import maybe_auto_title
 
+                    _session_key_for_title = session.get("session_key") or sid
+
+                    def _on_auto_title(_title: str) -> None:
+                        current_agent = session.get("agent")
+                        if current_agent is not None:
+                            _emit(
+                                "session.info",
+                                sid,
+                                _session_info_for(current_agent, _session_key_for_title),
+                            )
+
                     maybe_auto_title(
                         _get_db(),
-                        session.get("session_key") or sid,
+                        _session_key_for_title,
                         text,
                         raw,
                         session.get("history", []),
+                        title_callback=_on_auto_title,
                     )
                 except Exception:
                     pass
@@ -4203,7 +4269,7 @@ def _(rid, params: dict) -> dict:
             _emit(
                 "session.info",
                 params.get("session_id", ""),
-                _session_info(agent),
+                _session_info_for(agent, session["session_key"] if session else None),
             )
         return _ok(rid, {"key": key, "value": nv})
 
@@ -4693,7 +4759,7 @@ def _(rid, params: dict) -> dict:
             agent = session["agent"]
             if hasattr(agent, "refresh_tools"):
                 agent.refresh_tools()
-            _emit("session.info", params.get("session_id", ""), _session_info(agent))
+            _emit("session.info", params.get("session_id", ""), _session_info_for(agent, session["session_key"]))
 
         # Honor `always=true` by persisting the opt-out to config.
         if bool(params.get("always", False)):
@@ -5862,14 +5928,14 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
         elif name == "compress" and agent:
             _compress_session_history(session, arg)
             _sync_session_key_after_compress(sid, session)
-            _emit("session.info", sid, _session_info(agent))
+            _emit("session.info", sid, _session_info_for(agent, session["session_key"]))
         elif name == "fast" and agent:
             mode = arg.lower()
             if mode in {"fast", "on"}:
                 agent.service_tier = "priority"
             elif mode in {"normal", "off"}:
                 agent.service_tier = None
-            _emit("session.info", sid, _session_info(agent))
+            _emit("session.info", sid, _session_info_for(agent, session["session_key"]))
         elif name == "reload-mcp" and agent and hasattr(agent, "reload_mcp_tools"):
             agent.reload_mcp_tools()
         elif name == "stop":

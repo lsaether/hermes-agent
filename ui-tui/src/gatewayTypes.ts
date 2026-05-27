@@ -54,9 +54,11 @@ export type CommandDispatchResponse =
 export interface ConfigDisplayConfig {
   bell_on_complete?: boolean
   busy_input_mode?: string
+  completion_notification_method?: unknown
   details_mode?: string
   inline_diffs?: boolean
   mouse_tracking?: boolean | null | number | string
+  notify_on_approval?: unknown
   sections?: Record<string, string>
   show_cost?: boolean
   show_reasoning?: boolean
@@ -64,6 +66,7 @@ export interface ConfigDisplayConfig {
   thinking_mode?: string
   tui_auto_resume_recent?: boolean
   tui_compact?: boolean
+  tui_tab_title?: unknown
   /** Legacy alias for display.mouse_tracking. */
   tui_mouse?: boolean | null | number | string
   // Forward-compat: backend may send styles this client doesn't know yet —

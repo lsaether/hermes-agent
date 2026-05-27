@@ -2,11 +2,11 @@ import { type ScrollBoxHandle, useApp, useHasSelection, useSelection, useStdout,
 import { useStore } from '@nanostores/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
-import { STARTUP_RESUME_ID } from '../config/env.js'
+import { STARTUP_RESUME_ID, STARTUP_TAB_TITLE } from '../config/env.js'
 import { MAX_HISTORY, WHEEL_SCROLL_STEP } from '../config/limits.js'
 import { SECTION_NAMES, sectionMode } from '../domain/details.js'
 import { attachedImageNotice, imageTokenMeta } from '../domain/messages.js'
-import { fmtCwdBranch, shortCwd } from '../domain/paths.js'
+import { fmtCwdBranch } from '../domain/paths.js'
 import { type GatewayClient } from '../gatewayClient.js'
 import type {
   ClarifyRespondResponse,
@@ -29,11 +29,13 @@ import { estimatedMsgHeight, messageHeightKey } from '../lib/virtualHeights.js'
 import type { Msg, PanelSection, SlashCatalog } from '../types.js'
 
 import { createGatewayEventHandler } from './createGatewayEventHandler.js'
+import { type CompletionNotificationMethod, DEFAULT_COMPLETION_NOTIFICATION_METHOD } from './completionNotification.js'
 import { createSlashHandler } from './createSlashHandler.js'
 import { getInputSelection } from './inputSelectionStore.js'
 import { type GatewayRpc, type TranscriptRow } from './interfaces.js'
 import { $overlayState, patchOverlayState } from './overlayStore.js'
 import { scrollWithSelectionBy } from './scroll.js'
+import { buildTerminalTitle } from './terminalTitle.js'
 import { turnController } from './turnController.js'
 import { patchTurnState, useTurnSelector } from './turnStore.js'
 import { $uiState, getUiState, patchUiState } from './uiStore.js'
@@ -173,6 +175,10 @@ export function useMainApp(gw: GatewayClient) {
   const [turnStartedAt, setTurnStartedAt] = useState<null | number>(null)
   const [goodVibesTick, setGoodVibesTick] = useState(0)
   const [bellOnComplete, setBellOnComplete] = useState(false)
+  const [notifyOnApproval, setNotifyOnApproval] = useState(false)
+  const [completionNotificationMethod, setCompletionNotificationMethod] = useState<CompletionNotificationMethod>(
+    DEFAULT_COMPLETION_NOTIFICATION_METHOD
+  )
 
   const ui = useStore($uiState)
   const overlay = useStore($overlayState)
@@ -490,7 +496,15 @@ export function useMainApp(gw: GatewayClient) {
     }
   }, [ui.busy])
 
-  useConfigSync({ gw, setBellOnComplete, setVoiceEnabled, setVoiceRecordKey, sid: ui.sid })
+  useConfigSync({
+    gw,
+    setBellOnComplete,
+    setCompletionNotificationMethod,
+    setNotifyOnApproval,
+    setVoiceEnabled,
+    setVoiceRecordKey,
+    sid: ui.sid
+  })
 
   useEffect(() => {
     if (!ui.sid) {
@@ -523,13 +537,17 @@ export function useMainApp(gw: GatewayClient) {
   }, [gw, ui.sid])
 
   // Tab title: `⚠` waiting on approval/sudo/secret/clarify, `⏳` busy, `✓` idle.
-  const model = ui.info?.model?.replace(/^.*\//, '') ?? ''
-
   const marker = overlay.approval || overlay.sudo || overlay.secret || overlay.clarify ? '⚠' : ui.busy ? '⏳' : '✓'
+  const terminalTabTitle = buildTerminalTitle({
+    cwd: ui.info?.cwd,
+    marker,
+    model: ui.info?.model,
+    sessionTitle: ui.info?.title,
+    startupTitle: STARTUP_TAB_TITLE,
+    tabTitle: ui.tabTitle
+  })
 
-  const tabCwd = ui.info?.cwd
-
-  useTerminalTitle(model ? `${marker} ${model}${tabCwd ? ` · ${shortCwd(tabCwd, 24)}` : ''}` : 'Hermes')
+  useTerminalTitle(terminalTabTitle)
 
   useEffect(() => {
     if (!ui.sid || !stdout) {
@@ -699,7 +717,14 @@ export function useMainApp(gw: GatewayClient) {
           setCatalog
         },
         submission: { submitRef },
-        system: { bellOnComplete, stdout, sys },
+        system: {
+          bellOnComplete,
+          completionNotificationMethod,
+          notificationTitle: terminalTabTitle,
+          notifyOnApproval,
+          stdout,
+          sys
+        },
         transcript: { appendMessage, panel, setHistoryItems },
         voice: {
           setProcessing: setVoiceProcessing,
@@ -712,8 +737,10 @@ export function useMainApp(gw: GatewayClient) {
       appendMessage,
       bellOnComplete,
       clearSelection,
+      completionNotificationMethod,
       composerActions.setInput,
       gateway,
+      notifyOnApproval,
       panel,
       session.newSession,
       session.resetSession,
@@ -723,7 +750,8 @@ export function useMainApp(gw: GatewayClient) {
       setVoiceRecording,
       stdout,
       submitRef,
-      sys
+      sys,
+      terminalTabTitle
     ]
   )
 

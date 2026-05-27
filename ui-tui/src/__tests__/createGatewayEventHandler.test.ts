@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createGatewayEventHandler } from '../app/createGatewayEventHandler.js'
 import { getOverlayState, resetOverlayState } from '../app/overlayStore.js'
@@ -10,7 +10,7 @@ import type { Msg } from '../types.js'
 
 const ref = <T>(current: T) => ({ current })
 
-const buildCtx = (appended: Msg[]) =>
+const buildCtx = (appended: Msg[], systemOverrides: Record<string, unknown> = {}) =>
   ({
     composer: {
       dequeue: () => undefined,
@@ -35,7 +35,8 @@ const buildCtx = (appended: Msg[]) =>
     },
     system: {
       bellOnComplete: false,
-      sys: vi.fn()
+      sys: vi.fn(),
+      ...systemOverrides
     },
     transcript: {
       appendMessage: (msg: Msg) => appended.push(msg),
@@ -57,6 +58,103 @@ describe('createGatewayEventHandler', () => {
     resetTurnState()
     turnController.fullReset()
     patchUiState({ showReasoning: true })
+  })
+
+  afterEach(() => {
+    vi.unstubAllEnvs()
+  })
+
+  it('includes the final assistant text in the Ghostty OSC 9 completion notification', () => {
+    vi.stubEnv('TERM_PROGRAM', 'ghostty')
+    vi.stubEnv('TERM', 'xterm-ghostty')
+    const appended: Msg[] = []
+    const write = vi.fn()
+    const stdout = { isTTY: true, write }
+    const onEvent = createGatewayEventHandler(
+      buildCtx(appended, { bellOnComplete: true, completionNotificationMethod: 'osc9', stdout })
+    )
+
+    onEvent({ payload: { text: 'patched in the outcome text' }, type: 'message.complete' } as any)
+
+    expect(write).toHaveBeenCalledWith('\x1b]9;Hermes: patched in the outcome text\x07')
+  })
+
+  it('uses the live tab title when naming completion notifications', () => {
+    vi.stubEnv('TERM_PROGRAM', 'ghostty')
+    vi.stubEnv('TERM', 'xterm-ghostty')
+    const appended: Msg[] = []
+    const write = vi.fn()
+    const stdout = { isTTY: true, write }
+    const onEvent = createGatewayEventHandler(
+      buildCtx(appended, {
+        bellOnComplete: true,
+        completionNotificationMethod: 'osc9',
+        notificationTitle: 'Research',
+        stdout
+      })
+    )
+
+    onEvent({ payload: { text: 'summarized the run' }, type: 'message.complete' } as any)
+
+    expect(write).toHaveBeenCalledWith('\x1b]9;Research: summarized the run\x07')
+  })
+
+  it('falls back to the generic completion message when the assistant text is empty', () => {
+    vi.stubEnv('TERM_PROGRAM', 'ghostty')
+    vi.stubEnv('TERM', 'xterm-ghostty')
+    const appended: Msg[] = []
+    const write = vi.fn()
+    const stdout = { isTTY: true, write }
+    const onEvent = createGatewayEventHandler(
+      buildCtx(appended, { bellOnComplete: true, completionNotificationMethod: 'osc9', stdout })
+    )
+
+    onEvent({ payload: { text: '' }, type: 'message.complete' } as any)
+
+    expect(write).toHaveBeenCalledWith('\x1b]9;Hermes turn complete\x07')
+  })
+
+  it('wraps OSC 9 in tmux passthrough when completion notification runs inside tmux', () => {
+    vi.stubEnv('TERM_PROGRAM', 'ghostty')
+    vi.stubEnv('TERM', 'screen-256color')
+    vi.stubEnv('TMUX', '/tmp/tmux-1000/default,123,0')
+    const appended: Msg[] = []
+    const write = vi.fn()
+    const stdout = { isTTY: true, write }
+    const onEvent = createGatewayEventHandler(
+      buildCtx(appended, { bellOnComplete: true, completionNotificationMethod: 'osc9', stdout })
+    )
+
+    onEvent({ payload: { text: 'done' }, type: 'message.complete' } as any)
+
+    expect(write).toHaveBeenCalledWith('\x1bPtmux;\x1b\x1b]9;Hermes: done\x07\x1b\\')
+  })
+
+  it('falls back to plain BEL when completion bell is enabled in an unknown terminal', () => {
+    vi.stubEnv('TERM_PROGRAM', '')
+    vi.stubEnv('TERM', 'xterm-256color')
+    const appended: Msg[] = []
+    const write = vi.fn()
+    const stdout = { isTTY: true, write }
+    const onEvent = createGatewayEventHandler(
+      buildCtx(appended, { bellOnComplete: true, completionNotificationMethod: 'bel', stdout })
+    )
+
+    onEvent({ payload: { text: 'done' }, type: 'message.complete' } as any)
+
+    expect(write).toHaveBeenCalledWith('\x07')
+  })
+
+  it('does not emit completion notifications when stdout is not a TTY', () => {
+    vi.stubEnv('TERM_PROGRAM', 'ghostty')
+    const appended: Msg[] = []
+    const write = vi.fn()
+    const stdout = { isTTY: false, write }
+    const onEvent = createGatewayEventHandler(buildCtx(appended, { bellOnComplete: true, stdout }))
+
+    onEvent({ payload: { text: 'done' }, type: 'message.complete' } as any)
+
+    expect(write).not.toHaveBeenCalled()
   })
 
   it('archives incomplete todos into transcript flow at end of turn so they scroll up', () => {
@@ -831,6 +929,51 @@ describe('createGatewayEventHandler', () => {
       { text: 'protocol noise: bad framing', tone: 'info' },
       { text: 'command catalog unavailable: cold start', tone: 'info' }
     ])
+  })
+
+  it('emits an approval-needed notification when notifyOnApproval is enabled', () => {
+    vi.stubEnv('TERM_PROGRAM', 'ghostty')
+    vi.stubEnv('TERM', 'xterm-ghostty')
+    const appended: Msg[] = []
+    const write = vi.fn()
+    const stdout = { isTTY: true, write }
+    const onEvent = createGatewayEventHandler(
+      buildCtx(appended, {
+        completionNotificationMethod: 'osc9',
+        notificationTitle: 'Research',
+        notifyOnApproval: true,
+        stdout
+      })
+    )
+
+    onEvent({
+      payload: { command: 'rm -rf /tmp/nope', description: 'dangerous command' },
+      type: 'approval.request'
+    } as any)
+
+    expect(getOverlayState().approval).toEqual({ command: 'rm -rf /tmp/nope', description: 'dangerous command' })
+    expect(getUiState().status).toBe('approval needed')
+    expect(write).toHaveBeenCalledWith('\x1b]9;⚠ Attention Required: dangerous command\x07')
+  })
+
+  it('does not emit approval-needed notifications when notifyOnApproval is disabled', () => {
+    vi.stubEnv('TERM_PROGRAM', 'ghostty')
+    vi.stubEnv('TERM', 'xterm-ghostty')
+    const appended: Msg[] = []
+    const write = vi.fn()
+    const stdout = { isTTY: true, write }
+    const onEvent = createGatewayEventHandler(
+      buildCtx(appended, { completionNotificationMethod: 'osc9', notifyOnApproval: false, stdout })
+    )
+
+    onEvent({
+      payload: { command: 'rm -rf /tmp/nope', description: 'dangerous command' },
+      type: 'approval.request'
+    } as any)
+
+    expect(getOverlayState().approval).toMatchObject({ description: 'dangerous command' })
+    expect(getUiState().status).toBe('approval needed')
+    expect(write).not.toHaveBeenCalled()
   })
 
   it('still surfaces terminal turn failures as errors', () => {

@@ -27,6 +27,7 @@ export const TERMUX_TUI_MODE = isTermuxTuiMode()
 export const STARTUP_RESUME_ID = (process.env.HERMES_TUI_RESUME ?? '').trim()
 export const STARTUP_QUERY = (process.env.HERMES_TUI_QUERY ?? '').trim()
 export const STARTUP_IMAGE = (process.env.HERMES_TUI_IMAGE ?? '').trim()
+export const STARTUP_TAB_TITLE = (process.env.HERMES_TUI_TAB_TITLE ?? '').trim()
 
 // Mouse tracking mode resolution at startup. Per-mode selection (off|wheel|
 // buttons|all) lives in display.mouse_tracking in config.yaml — these env
@@ -46,7 +47,6 @@ const mouseTrackingDisabledLegacy = truthy(process.env.HERMES_TUI_DISABLE_MOUSE)
 const resolvedBootMouseEnabled =
   mouseTrackingOverride ?? (TERMUX_TUI_MODE ? false : !mouseTrackingDisabledLegacy)
 export const MOUSE_TRACKING: MouseTrackingMode = resolvedBootMouseEnabled ? 'all' : 'off'
-
 export const NO_CONFIRM_DESTRUCTIVE = truthy(process.env.HERMES_TUI_NO_CONFIRM)
 
 const inlineOverride = parseToggle(process.env.HERMES_TUI_INLINE)

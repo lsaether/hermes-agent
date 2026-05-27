@@ -7,6 +7,7 @@ import type { ImageAttachResponse, SessionCloseResponse } from '../gatewayTypes.
 import type { ParsedVoiceRecordKey } from '../lib/platform.js'
 import type { RpcResult } from '../lib/rpc.js'
 import type { Theme } from '../theme.js'
+import type { CompletionNotificationMethod } from './completionNotification.js'
 import type {
   ApprovalReq,
   ClarifyReq,
@@ -118,6 +119,7 @@ export interface UiState {
   status: string
   statusBar: StatusBarMode
   streaming: boolean
+  tabTitle: string
   theme: Theme
   usage: Usage
 }
@@ -248,6 +250,9 @@ export interface GatewayEventHandlerContext {
   }
   system: {
     bellOnComplete: boolean
+    completionNotificationMethod?: CompletionNotificationMethod
+    notificationTitle?: string
+    notifyOnApproval?: boolean
     stdout?: NodeJS.WriteStream
     sys: (text: string) => void
   }

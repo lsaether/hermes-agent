@@ -1106,6 +1106,19 @@ DEFAULT_CONFIG = {
         # users aren't surprised.  HERMES_TUI_RESUME=<id> always wins.
         "tui_auto_resume_recent": False,
         "bell_on_complete": False,
+        # Alert when the TUI is blocked waiting for command/tool approval.
+        # Uses the same backend selected by completion_notification_method,
+        # but the approval notification copy is intentionally separate.
+        "notify_on_approval": True,
+        # Optional terminal tab/window title for `hermes --tui`. Empty keeps
+        # the default dynamic model title (for example `✓ gpt-5.5 · ~`).
+        # Per-tab override: `HERMES_TUI_TAB_TITLE="Research" hermes --tui`.
+        "tui_tab_title": "",
+        # TUI completion notification backend: auto | native | osc9 | bel.
+        # `native` uses notify-send on Linux desktops (Hyprland/mako, GNOME,
+        # KDE, etc.) with the Hermes icon, falling back to terminal
+        # notifications if DBus/libnotify is unavailable.
+        "completion_notification_method": "auto",
         "show_reasoning": False,
         "streaming": False,
         "timestamps": False,      # Show [HH:MM] on user and assistant labels

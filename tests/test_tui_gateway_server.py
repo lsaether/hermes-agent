@@ -647,6 +647,42 @@ def test_session_resume_uses_parent_lineage_for_display(monkeypatch):
     assert captured["history_calls"] == [("tip", False), ("tip", True)]
 
 
+def test_session_resume_includes_persisted_title_in_info(monkeypatch):
+    class FakeDB:
+        def get_session(self, target):
+            return {"id": target}
+
+        def reopen_session(self, _target):
+            return None
+
+        def get_messages_as_conversation(self, _target, include_ancestors=False):
+            return []
+
+        def get_session_title(self, target):
+            assert target == "tip"
+            return "Durable Resume Title"
+
+    monkeypatch.setattr(server, "_get_db", lambda: FakeDB())
+    monkeypatch.setattr(server, "_enable_gateway_prompts", lambda: None)
+    monkeypatch.setattr(server, "_set_session_context", lambda target: [])
+    monkeypatch.setattr(server, "_clear_session_context", lambda tokens: None)
+    monkeypatch.setattr(
+        server,
+        "_make_agent",
+        lambda *args, **kwargs: types.SimpleNamespace(model="test", session_id="tip"),
+    )
+    monkeypatch.setattr(
+        server, "_init_session", lambda sid, key, agent, history, cols=80: None
+    )
+
+    resp = server.handle_request(
+        {"id": "1", "method": "session.resume", "params": {"session_id": "tip"}}
+    )
+
+    assert resp is not None
+    assert resp["result"]["info"]["title"] == "Durable Resume Title"
+
+
 def test_status_callback_emits_kind_and_text():
     with patch("tui_gateway.server._emit") as emit:
         cb = server._agent_cbs("sid")["status_callback"]

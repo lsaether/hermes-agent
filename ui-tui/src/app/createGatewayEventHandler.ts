@@ -15,6 +15,8 @@ import { formatToolCall, stripAnsi } from '../lib/text.js'
 import { fromSkin } from '../theme.js'
 import type { Msg, SubagentProgress, SubagentStatus } from '../types.js'
 
+import { sendApprovalNotification } from './approvalNotification.js'
+import { sendCompletionNotification } from './completionNotification.js'
 import { applyDelegationStatus, getDelegationState } from './delegationStore.js'
 import type { GatewayEventHandlerContext } from './interfaces.js'
 import { patchOverlayState } from './overlayStore.js'
@@ -77,7 +79,7 @@ const normalizeSubagentStatus = (status: unknown, fallback: SubagentStatus): Sub
 export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev: GatewayEvent) => void {
   const { rpc } = ctx.gateway
   const { STARTUP_RESUME_ID, newSession, resumeById, setCatalog } = ctx.session
-  const { bellOnComplete, stdout, sys } = ctx.system
+  const { bellOnComplete, completionNotificationMethod, notificationTitle, notifyOnApproval = false, stdout, sys } = ctx.system
   const { appendMessage, panel, setHistoryItems } = ctx.transcript
   const { setInput } = ctx.composer
   const { submitRef } = ctx.submission
@@ -576,6 +578,10 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
         patchOverlayState({ approval: { command: String(ev.payload.command ?? ''), description } })
         setStatus('approval needed')
 
+        if (notifyOnApproval) {
+          sendApprovalNotification({ description, method: completionNotificationMethod, stdout })
+        }
+
         return
       }
 
@@ -714,8 +720,13 @@ export function createGatewayEventHandler(ctx: GatewayEventHandlerContext): (ev:
           const msgs: Msg[] = finalMessages.length ? finalMessages : [{ role: 'assistant', text: finalText }]
           msgs.forEach(appendMessage)
 
-          if (bellOnComplete && stdout?.isTTY) {
-            stdout.write('\x07')
+          if (bellOnComplete) {
+            sendCompletionNotification({
+              method: completionNotificationMethod,
+              notificationTitle,
+              outcomeText: finalText,
+              stdout
+            })
           }
         }
 

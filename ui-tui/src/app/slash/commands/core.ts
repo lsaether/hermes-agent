@@ -16,6 +16,7 @@ import type {
 import { writeClipboardText } from '../../../lib/clipboard.js'
 import { writeOsc52Clipboard } from '../../../lib/osc52.js'
 import { configureDetectedTerminalKeybindings, configureTerminalKeybindings } from '../../../lib/terminalSetup.js'
+import { normalizeTabTitle } from '../../terminalTitle.js'
 import type { Msg, PanelSection } from '../../../types.js'
 import type { StatusBarMode } from '../../interfaces.js'
 import { patchOverlayState } from '../../overlayStore.js'
@@ -75,6 +76,14 @@ const DETAILS_USAGE =
   'usage: /details [hidden|collapsed|expanded|cycle]  or  /details <section> [hidden|collapsed|expanded|reset]'
 
 const DETAILS_SECTION_USAGE = 'usage: /details <section> [hidden|collapsed|expanded|reset]'
+const TAB_TITLE_RESET_WORDS = new Set(['reset', 'clear', 'default'])
+
+const patchSessionTitle = (title: string) => {
+  patchUiState(state => ({
+    ...state,
+    info: state.info ? { ...state.info, title } : { model: '', skills: {}, title, tools: {} }
+  }))
+}
 
 export const coreCommands: SlashCommand[] = [
   {
@@ -98,6 +107,7 @@ export const coreCommands: SlashCommand[] = [
               '/details <section> [hidden|collapsed|expanded|reset]',
               'override one section (thinking/tools/subagents/activity)'
             ],
+            ['/name <label|reset>', 'set this TUI terminal tab title'],
             ['/fortune [random|daily]', 'show a random or daily local fortune']
           ],
           title: 'TUI'
@@ -232,6 +242,9 @@ export const coreCommands: SlashCommand[] = [
           .then(
             ctx.guarded<SessionTitleResponse>(r => {
               const current = (r?.title ?? '').trim()
+              if (current) {
+                patchSessionTitle(current)
+              }
               ctx.transcript.sys(current ? `title: ${current}` : 'no title set')
             })
           )
@@ -250,10 +263,76 @@ export const coreCommands: SlashCommand[] = [
           ctx.guarded<SessionTitleResponse>(r => {
             const next = (r?.title ?? title).trim()
             const suffix = r?.pending ? ' (queued while session initializes)' : ''
+            patchSessionTitle(next)
             ctx.transcript.sys(`session title set: ${next}${suffix}`)
           })
         )
         .catch(ctx.guardedErr)
+    }
+  },
+
+  {
+    aliases: ['tab-title', 'tabtitle'],
+    help: 'set or show this TUI terminal tab title',
+    name: 'name',
+    run: (arg, ctx) => {
+      const raw = arg.trim()
+      const lower = raw.toLowerCase()
+
+      if (!arg) {
+        if (ctx.sid) {
+          ctx.gateway
+            .rpc<SessionTitleResponse>('session.title', { session_id: ctx.sid })
+            .then(
+              ctx.guarded<SessionTitleResponse>(r => {
+                const current = (r?.title ?? '').trim()
+                if (current) {
+                  patchSessionTitle(current)
+                }
+                ctx.transcript.sys(current ? `title: ${current}` : 'no title set')
+              })
+            )
+            .catch(ctx.guardedErr)
+
+          return
+        }
+
+        return ctx.transcript.sys(ctx.ui.tabTitle ? `tab title: ${ctx.ui.tabTitle}` : 'tab title: default')
+      }
+
+      if (TAB_TITLE_RESET_WORDS.has(lower)) {
+        patchUiState({ tabTitle: '' })
+        ctx.gateway.rpc<ConfigSetResponse>('config.set', { key: 'tui_tab_title', value: '' }).catch(() => {})
+        ctx.transcript.sys('tab title reset to default')
+
+        return
+      }
+
+      const next = normalizeTabTitle(raw)
+
+      if (!next) {
+        return ctx.transcript.sys('usage: /name <tab title|reset>')
+      }
+
+      if (ctx.sid) {
+        ctx.gateway
+          .rpc<SessionTitleResponse>('session.title', { session_id: ctx.sid, title: next })
+          .then(
+            ctx.guarded<SessionTitleResponse>(r => {
+              const title = (r?.title ?? next).trim()
+              const suffix = r?.pending ? ' (queued while session initializes)' : ''
+              patchSessionTitle(title)
+              ctx.transcript.sys(`session title set: ${title}${suffix}`)
+            })
+          )
+          .catch(ctx.guardedErr)
+
+        return
+      }
+
+      patchUiState({ tabTitle: next })
+      ctx.gateway.rpc<ConfigSetResponse>('config.set', { key: 'tui_tab_title', value: next }).catch(() => {})
+      ctx.transcript.sys(`tab title set: ${next}`)
     }
   },
 
