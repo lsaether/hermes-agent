@@ -76,6 +76,7 @@ import {
   updateSelection
 } from './selection.js'
 import {
+  DECSTBM_SCROLL_OPTIMIZATION_SUPPORTED,
   needsAltScreenResizeScrollbackClear,
   supportsExtendedKeys,
   SYNC_OUTPUT_SUPPORTED,
@@ -913,7 +914,10 @@ export default class Ink {
       // renders the scrolled-but-not-yet-repainted intermediate state.
       // tmux is the main case (re-emits DECSTBM with its own timing and
       // doesn't implement DEC 2026, so SYNC_OUTPUT_SUPPORTED is false).
-      SYNC_OUTPUT_SUPPORTED
+      // Some terminals (currently Ghostty OpenGL) also have host-side repaint
+      // artifacts on DECSTBM region scrolls, so we can fall back to repainting
+      // shifted rows even when synchronized output exists.
+      DECSTBM_SCROLL_OPTIMIZATION_SUPPORTED
     )
 
     const diffMs = performance.now() - tDiff
