@@ -3279,6 +3279,217 @@ class HermesCLI:
             self._last_invalidate = now
             self._app.invalidate()
 
+    def _handle_peer_event(self, event: Dict[str, Any]) -> None:
+        """Inject a peer-originated ACP event into the chat transcript.
+
+        Called by ``process_loop`` while draining ``self._peer_events``.
+        The bridge fans out ``session/update`` notifications to all
+        subscribers; since this TUI subscribes via a persistent listener
+        AS WELL as via its own per-turn shim, the bridge will echo our
+        own session/prompt back to us as a ``user_message_chunk``. The
+        dedup against ``self._recent_user_inputs`` suppresses that echo.
+
+        Peer agent output (``agent_message_chunk`` while we're not
+        actively running our own turn) is rendered live via ``_cprint``
+        with a ``[peer-agent]`` tag so the user can tell it apart from
+        their own in-flight responses.
+        """
+        if not isinstance(event, dict):
+            return
+        if event.get("method") != "session/update":
+            return
+        update = (event.get("params") or {}).get("update") or {}
+        kind = update.get("sessionUpdate") or ""
+        content_obj = update.get("content")
+        if isinstance(content_obj, dict):
+            text = str(content_obj.get("text") or "").strip()
+        else:
+            text = ""
+
+        if kind == "user_message_chunk":
+            if not text:
+                return
+            # Suppress our own outgoing prompt that the bridge bounced back.
+            recent = getattr(self, "_recent_user_inputs", None)
+            if recent is not None and text in recent:
+                try:
+                    recent.remove(text)
+                except ValueError:
+                    pass
+                return
+            try:
+                self.conversation_history.append(
+                    {"role": "user", "content": text, "source": "peer"}
+                )
+            except Exception:
+                pass
+            try:
+                _cprint(f"\n👤 \x1b[36mpeer ▶\x1b[0m {text}\n")
+            except Exception:
+                pass
+            self._invalidate(min_interval=0.0)
+        elif kind == "agent_message_chunk":
+            # Only render peer agent output when we are NOT mid-turn; if we
+            # are, our own streaming pipeline is already painting tokens and
+            # mixing in peer output would be chaos.
+            if getattr(self, "_agent_running", False):
+                return
+            if not text:
+                return
+            try:
+                _cprint(text, end="")
+            except Exception:
+                pass
+            self._invalidate(min_interval=0.0)
+        elif kind == "tool_call":
+            if getattr(self, "_agent_running", False):
+                return
+            name = update.get("title") or update.get("name") or "tool"
+            try:
+                _cprint(f"\n\x1b[2m🔧 {name}\x1b[0m\n")
+            except Exception:
+                pass
+            self._invalidate(min_interval=0.0)
+        # Other kinds (plan, agent_thought_chunk, etc.) are silently dropped
+        # for v0 — they're noisy and not core to the co-presence story.
+
+    def _start_peer_listener(self) -> None:
+        """Spawn a daemon thread that holds a persistent WebSocket connection
+        to a hermes-bridge endpoint and pumps incoming ACP notifications into
+        ``self._peer_events``.
+
+        Activated only when ``HERMES_BRIDGE_URL`` is set in the environment.
+        Without that env var this is a no-op and the TUI behaves exactly as
+        upstream Hermes does (no co-presence).
+        """
+        bridge_url = os.environ.get("HERMES_BRIDGE_URL", "").strip()
+        if not bridge_url:
+            return
+        if self._peer_listener_thread is not None and self._peer_listener_thread.is_alive():
+            return
+
+        self._peer_listener_stop = threading.Event()
+        stop_event = self._peer_listener_stop
+        peer_queue = self._peer_events
+        app_ref_getter = lambda: self._app  # noqa: E731
+
+        def _run_listener() -> None:
+            import asyncio as _asyncio
+            try:
+                import websockets as _websockets
+            except ImportError:
+                logger.warning(
+                    "hermes co-presence listener requested but 'websockets' "
+                    "package not installed; skipping"
+                )
+                return
+
+            async def _listen() -> None:
+                while not stop_event.is_set():
+                    try:
+                        async with _websockets.connect(bridge_url) as ws:
+                            # ACP handshake — we go through the bridge's session
+                            # resolution caching, so we get the same ACP sessionId
+                            # as the per-turn shim. That means peer events we
+                            # receive correspond to the same conversation.
+                            await ws.send(json.dumps({
+                                "jsonrpc": "2.0", "id": 1,
+                                "method": "initialize",
+                                "params": {
+                                    "protocolVersion": 1,
+                                    "clientInfo": {
+                                        "name": "hermes-tui-peer-listener",
+                                        "version": "0.1.0",
+                                    },
+                                    "clientCapabilities": {},
+                                },
+                            }))
+                            while True:
+                                raw = await ws.recv()
+                                msg = json.loads(raw)
+                                if msg.get("id") == 1:
+                                    break
+                                if "method" in msg and "id" not in msg:
+                                    peer_queue.put(msg)
+                            await ws.send(json.dumps({
+                                "jsonrpc": "2.0", "id": 2,
+                                "method": "session/new",
+                                "params": {
+                                    "cwd": str(Path.cwd()),
+                                    "mcpServers": [],
+                                },
+                            }))
+                            while True:
+                                raw = await ws.recv()
+                                msg = json.loads(raw)
+                                if msg.get("id") == 2:
+                                    break
+                                if "method" in msg and "id" not in msg:
+                                    peer_queue.put(msg)
+                            logger.info(
+                                "peer listener attached to %s", bridge_url
+                            )
+                            # Main stream: forward every notification.
+                            async for raw_msg in ws:
+                                if stop_event.is_set():
+                                    break
+                                try:
+                                    parsed = json.loads(raw_msg)
+                                except (json.JSONDecodeError, ValueError):
+                                    continue
+                                if not isinstance(parsed, dict):
+                                    continue
+                                # Only forward server-originated notifications
+                                # (no client request/response noise).
+                                method = parsed.get("method")
+                                msg_id = parsed.get("id")
+                                if method and msg_id is None:
+                                    peer_queue.put(parsed)
+                                    app = app_ref_getter()
+                                    if app is not None:
+                                        try:
+                                            app.invalidate()
+                                        except Exception:
+                                            pass
+                                elif method and msg_id is not None:
+                                    # Agent-initiated request — answer with
+                                    # a generic error so the agent doesn't
+                                    # stall. Co-presence v0 doesn't handle
+                                    # permission requests via the listener.
+                                    try:
+                                        await ws.send(json.dumps({
+                                            "jsonrpc": "2.0",
+                                            "id": msg_id,
+                                            "error": {
+                                                "code": -32601,
+                                                "message": "peer listener does not handle agent-initiated requests",
+                                            },
+                                        }))
+                                    except Exception:
+                                        pass
+                    except Exception as exc:
+                        if stop_event.is_set():
+                            return
+                        logger.warning(
+                            "peer listener connection dropped: %s; reconnecting in 2s",
+                            exc,
+                        )
+                        await _asyncio.sleep(2.0)
+
+            try:
+                _asyncio.run(_listen())
+            except Exception:
+                logger.exception("peer listener crashed")
+
+        t = threading.Thread(
+            target=_run_listener,
+            name="hermes-peer-listener",
+            daemon=True,
+        )
+        t.start()
+        self._peer_listener_thread = t
+        logger.info("started peer listener thread against %s", bridge_url)
+
     def _force_full_redraw(self) -> None:
         """Force a clean full-screen repaint of the prompt_toolkit UI.
 
@@ -12632,6 +12843,16 @@ class HermesCLI:
         self._agent_running = False
         self._pending_input = queue.Queue()     # For normal input (commands + new queries)
         self._interrupt_queue = queue.Queue()   # For messages typed while agent is running
+        # Peer-event plumbing (co-presence). The persistent listener thread
+        # drops session/update notifications here; process_loop drains and
+        # routes them through _handle_peer_event.
+        self._peer_events: "queue.Queue[Dict[str, Any]]" = queue.Queue()
+        # Recent user inputs we've submitted ourselves, for dedup against the
+        # bridge's user_message_chunk echo of our own outgoing prompts.
+        import collections as _collections
+        self._recent_user_inputs: "deque[str]" = _collections.deque(maxlen=32)
+        self._peer_listener_thread: Optional[threading.Thread] = None
+        self._peer_listener_stop: Optional[threading.Event] = None
         # See constructor note. Mirrored here for the run() path that skips
         # the earlier __init__ branch.
         self._last_turn_interrupted = False
@@ -14340,6 +14561,12 @@ class HermesCLI:
         _disable_prompt_toolkit_cpr_warning(app)
         self._app = app  # Store reference for clarify_callback
 
+        # Start the persistent peer listener (co-presence). No-op unless
+        # HERMES_BRIDGE_URL is set. Runs in its own thread with its own
+        # asyncio loop, drops events into self._peer_events, and triggers
+        # redraws via app.invalidate() (which is thread-safe).
+        self._start_peer_listener()
+
         # ── Fix ghost status-bar lines on terminal resize ──────────────
         # Resize handling: monkey-patch prompt_toolkit's _output_screen_diff
         # to suppress the deliberate "reserve vertical space" scroll-up.
@@ -14454,6 +14681,18 @@ class HermesCLI:
                                     self._pending_input.put(_synth)
                             except Exception:
                                 pass
+                        # Drain peer events from the listener thread regardless
+                        # of agent_running — _handle_peer_event itself decides
+                        # what's safe to render mid-turn (mostly nothing).
+                        while True:
+                            try:
+                                _peer_event = self._peer_events.get_nowait()
+                            except queue.Empty:
+                                break
+                            try:
+                                self._handle_peer_event(_peer_event)
+                            except Exception:
+                                logger.exception("error handling peer event")
                         continue
                     
                     if not user_input:
@@ -14473,6 +14712,13 @@ class HermesCLI:
                         user_input, _had_mouse_reports = _strip_leaked_terminal_responses_with_meta(user_input)
                         if _had_mouse_reports:
                             self._recover_terminal_input_modes(reason="mouse reports leaked into submitted input")
+                        # Record for peer-event dedup: the bridge echoes our
+                        # session/prompt back as a user_message_chunk; the
+                        # dedup logic in _handle_peer_event removes the entry
+                        # when the echo arrives.
+                        stripped_input = user_input.strip()
+                        if stripped_input:
+                            self._recent_user_inputs.append(stripped_input)
                     
                     # Check for commands — but detect dragged/pasted file paths first.
                     # See _detect_file_drop() for details.

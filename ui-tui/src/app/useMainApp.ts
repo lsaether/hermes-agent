@@ -23,6 +23,7 @@ import { composerPromptWidth } from '../lib/inputMetrics.js'
 import { appendTranscriptMessage } from '../lib/messages.js'
 import { DEFAULT_VOICE_RECORD_KEY, isMac, type ParsedVoiceRecordKey } from '../lib/platform.js'
 import { asRpcResult, rpcErrorMessage } from '../lib/rpc.js'
+import { usePeerMessageListener } from './usePeerMessageListener.js'
 import { terminalParityHints } from '../lib/terminalParity.js'
 import { buildToolTrailLine, sameToolTrailGroup, toolTrailLabel } from '../lib/text.js'
 import { estimatedMsgHeight, messageHeightKey } from '../lib/virtualHeights.js'
@@ -749,6 +750,11 @@ export function useMainApp(gw: GatewayClient) {
       gw.off('exit', exitHandler)
     }
   }, [gw, sys])
+
+  // Co-presence: subscribe to a hermes-bridge endpoint (if HERMES_BRIDGE_URL
+  // is set) and inject peer messages into the transcript. No-op without the
+  // env var, so it's safe to mount unconditionally.
+  usePeerMessageListener({ appendMessage, lastUserMsgRef, sys })
 
   useLongRunToolCharms()
 

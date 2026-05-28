@@ -456,6 +456,93 @@ PROVIDER_REGISTRY: Dict[str, ProviderConfig] = {
         api_key_env_vars=("AZURE_FOUNDRY_API_KEY",),
         base_url_env_var="AZURE_FOUNDRY_BASE_URL",
     ),
+    # -- ACP agent providers (Agent Client Protocol) -------------------------
+    # Each spawns an external coding agent via ACP. Auth is handled by the
+    # agent's own adapter, with env var bridging in acp_agent_registry.py.
+    "hermes-acp": ProviderConfig(
+        id="hermes-acp",
+        name="Hermes (ACP)",
+        auth_type="external_process",
+        inference_base_url="acp://hermes",
+    ),
+    "claude-acp": ProviderConfig(
+        id="claude-acp",
+        name="Claude (ACP)",
+        auth_type="external_process",
+        inference_base_url="acp://claude",
+    ),
+    "codex-acp": ProviderConfig(
+        id="codex-acp",
+        name="Codex CLI (ACP)",
+        auth_type="external_process",
+        inference_base_url="acp://codex",
+    ),
+    "gemini-acp": ProviderConfig(
+        id="gemini-acp",
+        name="Gemini CLI (ACP)",
+        auth_type="external_process",
+        inference_base_url="acp://gemini",
+    ),
+    "cursor-acp": ProviderConfig(
+        id="cursor-acp",
+        name="Cursor (ACP)",
+        auth_type="external_process",
+        inference_base_url="acp://cursor",
+    ),
+    "kiro-acp": ProviderConfig(
+        id="kiro-acp",
+        name="Kiro (ACP)",
+        auth_type="external_process",
+        inference_base_url="acp://kiro",
+    ),
+    "kilocode-acp": ProviderConfig(
+        id="kilocode-acp",
+        name="KiloCode (ACP)",
+        auth_type="external_process",
+        inference_base_url="acp://kilocode",
+    ),
+    "opencode-acp": ProviderConfig(
+        id="opencode-acp",
+        name="OpenCode (ACP)",
+        auth_type="external_process",
+        inference_base_url="acp://opencode",
+    ),
+    "kimi-acp": ProviderConfig(
+        id="kimi-acp",
+        name="Kimi (ACP)",
+        auth_type="external_process",
+        inference_base_url="acp://kimi",
+    ),
+    "qwen-acp": ProviderConfig(
+        id="qwen-acp",
+        name="Qwen (ACP)",
+        auth_type="external_process",
+        inference_base_url="acp://qwen",
+    ),
+    "cline-acp": ProviderConfig(
+        id="cline-acp",
+        name="Cline (ACP)",
+        auth_type="external_process",
+        inference_base_url="acp://cline",
+    ),
+    "amp-acp": ProviderConfig(
+        id="amp-acp",
+        name="Amp (ACP)",
+        auth_type="external_process",
+        inference_base_url="acp://amp",
+    ),
+    "droid-acp": ProviderConfig(
+        id="droid-acp",
+        name="Droid (ACP)",
+        auth_type="external_process",
+        inference_base_url="acp://droid",
+    ),
+    "iflow-acp": ProviderConfig(
+        id="iflow-acp",
+        name="iFlow (ACP)",
+        auth_type="external_process",
+        inference_base_url="acp://iflow",
+    ),
 }
 
 # Auto-extend PROVIDER_REGISTRY with any api-key provider registered in
@@ -6174,7 +6261,12 @@ def resolve_api_key_provider_credentials(provider_id: str) -> Dict[str, Any]:
 
 
 def resolve_external_process_provider_credentials(provider_id: str) -> Dict[str, Any]:
-    """Resolve runtime details for local subprocess-backed providers."""
+    """Resolve runtime details for local subprocess-backed providers.
+
+    For ACP agents (provider IDs ending in ``-acp``), the command is resolved
+    from the ACP agent registry.  For the legacy ``copilot-acp`` provider,
+    the original env-var resolution is preserved for backwards compatibility.
+    """
     pconfig = PROVIDER_REGISTRY.get(provider_id)
     if not pconfig or pconfig.auth_type != "external_process":
         raise AuthError(
@@ -6187,6 +6279,25 @@ def resolve_external_process_provider_credentials(provider_id: str) -> Dict[str,
     if not base_url:
         base_url = pconfig.inference_base_url
 
+    # Derive agent name from provider id: "claude-acp" -> "claude"
+    agent_name = provider_id.removesuffix("-acp") if provider_id.endswith("-acp") else ""
+
+    # Try the generalized ACP agent registry first
+    if agent_name:
+        from agent.acp_agent_registry import resolve_agent_command, split_agent_command
+        agent_cmd = resolve_agent_command(agent_name)
+        if agent_cmd:
+            argv = split_agent_command(agent_cmd)
+            return {
+                "provider": provider_id,
+                "api_key": f"{agent_name}-acp",
+                "base_url": base_url.rstrip("/"),
+                "command": argv[0],
+                "args": argv[1:],
+                "source": "process",
+            }
+
+    # Legacy copilot-specific resolution (backwards compat)
     command = (
         os.getenv("HERMES_COPILOT_ACP_COMMAND", "").strip()
         or os.getenv("COPILOT_CLI_PATH", "").strip()
@@ -6197,15 +6308,15 @@ def resolve_external_process_provider_credentials(provider_id: str) -> Dict[str,
     resolved_command = shutil.which(command) if command else None
     if not resolved_command and not base_url.startswith("acp+tcp://"):
         raise AuthError(
-            f"Could not find the Copilot CLI command '{command}'. "
-            "Install GitHub Copilot CLI or set HERMES_COPILOT_ACP_COMMAND/COPILOT_CLI_PATH.",
+            f"Could not find the ACP agent command '{command}' for provider '{provider_id}'. "
+            f"Install the agent or set HERMES_ACP_{agent_name.upper().replace('-', '_')}_COMMAND.",
             provider=provider_id,
-            code="missing_copilot_cli",
+            code="missing_acp_cli",
         )
 
     return {
         "provider": provider_id,
-        "api_key": "copilot-acp",
+        "api_key": f"{agent_name or provider_id}-acp",
         "base_url": base_url.rstrip("/"),
         "command": resolved_command or command,
         "args": args,

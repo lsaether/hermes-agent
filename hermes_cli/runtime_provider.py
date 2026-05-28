@@ -1448,10 +1448,11 @@ def resolve_runtime_provider(
             logger.info("Google Gemini OAuth credentials failed; "
                         "falling through to next provider.")
 
-    if provider == "copilot-acp":
+    # ACP agent providers (external_process auth type)
+    if provider.endswith("-acp"):
         creds = resolve_external_process_provider_credentials(provider)
         return {
-            "provider": "copilot-acp",
+            "provider": provider,
             "api_mode": "chat_completions",
             "base_url": creds.get("base_url", "").rstrip("/"),
             "api_key": creds.get("api_key", ""),
