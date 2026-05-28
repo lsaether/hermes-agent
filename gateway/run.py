@@ -12054,6 +12054,35 @@ class GatewayRunner:
             self._reasoning_config = reasoning_config
             self._service_tier = self._load_service_tier()
             turn_route = self._resolve_turn_agent_config(prompt, model, runtime_kwargs)
+            parent_session_id = None
+            root_session_id = None
+            try:
+                session_entry = self.session_store.get_or_create_session(source)
+                parent_session_id = getattr(session_entry, "session_id", None)
+            except Exception as e:
+                logger.debug(
+                    "Could not resolve parent session for background task %s: %s",
+                    task_id,
+                    e,
+                )
+            if parent_session_id:
+                root_session_id = parent_session_id
+                if self._session_db:
+                    try:
+                        root_session_id = (
+                            self._session_db.get_session(parent_session_id) or {}
+                        ).get("root_session_id") or parent_session_id
+                    except Exception as e:
+                        logger.debug(
+                            "Could not resolve root session for background task %s: %s",
+                            task_id,
+                            e,
+                        )
+            session_lineage_kwargs = {}
+            if parent_session_id:
+                session_lineage_kwargs["parent_session_id"] = parent_session_id
+            if root_session_id:
+                session_lineage_kwargs["root_session_id"] = root_session_id
 
             # Enrich the prompt with image descriptions so the background
             # agent can see user-attached images (same as the main flow).
@@ -12091,6 +12120,11 @@ class GatewayRunner:
                     provider_require_parameters=pr.get("require_parameters", False),
                     provider_data_collection=pr.get("data_collection"),
                     session_id=task_id,
+                    **session_lineage_kwargs,
+                    session_kind="background_command",
+                    creator_kind="command",
+                    creator_command="/background",
+                    is_user_facing=False,
                     platform=platform_key,
                     user_id=source.user_id,
                     user_id_alt=source.user_id_alt,
@@ -13396,6 +13430,10 @@ class GatewayRunner:
                 source=source.platform.value if source.platform else "gateway",
                 model=(self.config.get("model", {}) or {}).get("default") if isinstance(self.config, dict) else None,
                 parent_session_id=parent_session_id,
+                session_kind="branch",
+                creator_kind="command",
+                creator_command="/branch",
+                is_user_facing=True,
             )
         except Exception as e:
             logger.error("Failed to create branch session: %s", e)

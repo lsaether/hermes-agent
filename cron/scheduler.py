@@ -1652,6 +1652,8 @@ def _run_job_impl(job: dict) -> tuple[bool, str, str, Optional[str]]:
             skip_memory=True,  # Cron system prompts would corrupt user representations
             platform="cron",
             session_id=_cron_session_id,
+            session_kind="cron",
+            creator_kind="scheduler",
             session_db=_session_db,
         )
         

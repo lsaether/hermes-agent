@@ -517,8 +517,25 @@ def compress_context(
                 model=agent.model,
                 model_config=agent._session_init_model_config,
                 parent_session_id=old_session_id,
+                root_session_id=getattr(agent, "_root_session_id", None),
+                session_kind="continuation",
+                creator_kind="compression",
+                is_user_facing=True,
             )
             agent._session_db_created = True
+            try:
+                new_session = agent._session_db.get_session(agent.session_id) or {}
+                agent._root_session_id = new_session.get("root_session_id") or old_session_id
+            except Exception:
+                agent._root_session_id = old_session_id
+            agent._parent_session_id = old_session_id
+            agent._session_kind = "continuation"
+            agent._creator_kind = "compression"
+            agent._creator_tool_name = None
+            agent._creator_tool_call_id = None
+            agent._creator_task_index = None
+            agent._creator_command = None
+            agent._is_user_facing = True
             # Auto-number the title for the continuation session
             if old_title:
                 try:

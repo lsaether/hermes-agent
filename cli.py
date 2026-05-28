@@ -7009,10 +7009,22 @@ class HermesCLI:
                     "reasoning_config": self.reasoning_config,
                 },
                 parent_session_id=parent_session_id,
+                session_kind="branch",
+                creator_kind="command",
+                creator_command="/branch",
+                is_user_facing=True,
             )
         except Exception as e:
             _cprint(f"  Failed to create branch session: {e}")
             return
+
+        branch_root_session_id = parent_session_id
+        try:
+            branch_root_session_id = (
+                self._session_db.get_session(new_session_id) or {}
+            ).get("root_session_id") or parent_session_id
+        except Exception:
+            pass
 
         # Copy conversation history to the new session
         for msg in self.conversation_history:
@@ -7047,6 +7059,12 @@ class HermesCLI:
         if self.agent:
             self.agent.session_id = new_session_id
             self.agent.session_start = now
+            setattr(self.agent, "_parent_session_id", parent_session_id)
+            setattr(self.agent, "_session_kind", "branch")
+            setattr(self.agent, "_root_session_id", branch_root_session_id)
+            setattr(self.agent, "_creator_kind", "command")
+            setattr(self.agent, "_creator_command", "/branch")
+            setattr(self.agent, "_is_user_facing", True)
             self.agent.reset_session_state()
             if hasattr(self.agent, "_last_flushed_db_idx"):
                 self.agent._last_flushed_db_idx = len(self.conversation_history)
@@ -8959,6 +8977,25 @@ class HermesCLI:
         _cprint("  You can continue chatting — results will appear when done.\n")
 
         turn_route = self._resolve_turn_agent_config(prompt)
+        parent_session_id = getattr(self, "session_id", None)
+        root_session_id = parent_session_id
+        try:
+            root_session_id = getattr(self.agent, "_root_session_id", None) or root_session_id
+        except Exception:
+            pass
+        session_lineage_kwargs = {}
+        if parent_session_id:
+            if root_session_id == parent_session_id and self._session_db:
+                try:
+                    root_session_id = (
+                        self._session_db.get_session(parent_session_id) or {}
+                    ).get("root_session_id") or parent_session_id
+                except Exception:
+                    root_session_id = parent_session_id
+            session_lineage_kwargs = {
+                "parent_session_id": parent_session_id,
+                "root_session_id": root_session_id,
+            }
 
         def run_background():
             set_sudo_password_callback(self._sudo_password_callback)
@@ -8981,6 +9018,11 @@ class HermesCLI:
                     quiet_mode=True,
                     verbose_logging=False,
                     session_id=task_id,
+                    **session_lineage_kwargs,
+                    session_kind="background_command",
+                    creator_kind="command",
+                    creator_command="/background",
+                    is_user_facing=False,
                     platform="cli",
                     session_db=self._session_db,
                     reasoning_config=self.reasoning_config,

@@ -107,6 +107,23 @@ def _shape_message(m: Dict[str, Any], anchor_id: Optional[int] = None) -> Dict[s
     return {k: v for k, v in entry.items() if v is not None or k in ("content",)}
 
 
+_SESSION_PROVENANCE_FIELDS = (
+    "session_kind",
+    "root_session_id",
+    "creator_kind",
+    "creator_tool_name",
+    "creator_tool_call_id",
+    "creator_task_index",
+    "creator_command",
+    "is_user_facing",
+)
+
+
+def _session_provenance(meta: Dict[str, Any]) -> Dict[str, Any]:
+    """Return compact first-class session provenance fields for consumers."""
+    return {k: meta.get(k) for k in _SESSION_PROVENANCE_FIELDS if k in meta}
+
+
 def _list_recent_sessions(db, limit: int, current_session_id: str = None) -> str:
     """Return metadata for the most recent sessions (no LLM calls, no FTS5)."""
     try:
@@ -134,6 +151,7 @@ def _list_recent_sessions(db, limit: int, current_session_id: str = None) -> str
                 "last_active": s.get("last_active", ""),
                 "message_count": s.get("message_count", 0),
                 "preview": s.get("preview", ""),
+                **_session_provenance(s),
             })
             if len(results) >= limit:
                 break
@@ -263,6 +281,7 @@ def _scroll(
             "source": session_meta.get("source"),
             "model": session_meta.get("model"),
             "title": session_meta.get("title"),
+            **_session_provenance(session_meta),
         },
         "window": window,
         "messages": [_shape_message(m, anchor_id=around_message_id) for m in messages],
@@ -343,6 +362,10 @@ def _discover(
             session_meta = db.get_session(lineage_root) or {}
         except Exception:
             session_meta = {}
+        try:
+            hit_session_meta = db.get_session(hit_sid) or {}
+        except Exception:
+            hit_session_meta = {}
 
         entry = {
             "session_id": hit_sid,
@@ -360,6 +383,7 @@ def _discover(
             "bookend_end": [_shape_message(m) for m in (view.get("bookend_end") or [])],
             "messages_before": view.get("messages_before", 0),
             "messages_after": view.get("messages_after", 0),
+            **_session_provenance(hit_session_meta or session_meta),
         }
         if lineage_root and lineage_root != hit_sid:
             entry["parent_session_id"] = lineage_root

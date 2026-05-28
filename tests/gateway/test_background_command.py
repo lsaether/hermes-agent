@@ -5,6 +5,8 @@ background session) across gateway messenger platforms.
 """
 
 import asyncio
+import os
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -230,7 +232,7 @@ class TestRunBackgroundTask:
         assert "failed" in call_args[1].get("content", call_args[0][1] if len(call_args[0]) > 1 else "").lower()
 
     @pytest.mark.asyncio
-    async def test_successful_task_sends_result(self):
+    async def test_successful_task_sends_result(self, monkeypatch):
         """When the agent completes successfully, the result is sent."""
         runner = _make_runner()
         mock_adapter = AsyncMock()
@@ -238,6 +240,17 @@ class TestRunBackgroundTask:
         mock_adapter.extract_media = MagicMock(return_value=([], "Hello from background!"))
         mock_adapter.extract_images = MagicMock(return_value=([], "Hello from background!"))
         runner.adapters[Platform.TELEGRAM] = mock_adapter
+        monkeypatch.setattr(
+            runner,
+            "session_store",
+            SimpleNamespace(
+                get_or_create_session=MagicMock(
+                    return_value=SimpleNamespace(session_id="parent-session")
+                )
+            ),
+        )
+        runner._session_db = MagicMock()
+        runner._session_db.get_session.return_value = {"root_session_id": "root-session"}
 
         source = SessionSource(
             platform=Platform.TELEGRAM,
@@ -257,6 +270,14 @@ class TestRunBackgroundTask:
             MockAgent.return_value = mock_agent_instance
 
             await runner._run_background_task("say hello", source, "bg_test")
+
+        kwargs = MockAgent.call_args.kwargs
+        assert kwargs["parent_session_id"] == "parent-session"
+        assert kwargs["root_session_id"] == "root-session"
+        assert kwargs["session_kind"] == "background_command"
+        assert kwargs["creator_kind"] == "command"
+        assert kwargs["creator_command"] == "/background"
+        assert kwargs["is_user_facing"] is False
 
         # Should have sent the result
         mock_adapter.send.assert_called_once()

@@ -100,3 +100,71 @@ class TestBackgroundCommandTuiRefresh:
         # Clean up
         cli_obj._background_tasks.pop(task_id, None)
         assert task_id not in cli_obj._background_tasks
+
+    def test_background_command_stamps_session_provenance(self, monkeypatch):
+        """CLI /background children should be typed and linked to the foreground session."""
+        cli_obj = _make_cli()
+        cli_obj.session_id = "parent-session"
+        cli_obj.max_turns = 90
+        cli_obj.enabled_toolsets = ["terminal"]
+        cli_obj._session_db = MagicMock()
+        cli_obj._session_db.get_session.return_value = {"root_session_id": "root-session"}
+        cli_obj.reasoning_config = {"effort": "low"}
+        cli_obj.service_tier = None
+        cli_obj._providers_only = None
+        cli_obj._providers_ignore = None
+        cli_obj._providers_order = None
+        cli_obj._provider_sort = None
+        cli_obj._provider_require_params = None
+        cli_obj._provider_data_collection = None
+        cli_obj._openrouter_min_coding_score = None
+        cli_obj._fallback_model = None
+        cli_obj._agent_running = False
+        cli_obj._spinner_text = ""
+        cli_obj._invalidate = MagicMock()
+        cli_obj.bell_on_complete = False
+        cli_obj.final_response_markdown = "auto"
+        cli_obj._ensure_runtime_credentials = MagicMock(return_value=True)
+        cli_obj._resolve_turn_agent_config = MagicMock(return_value={
+            "model": "test-model",
+            "runtime": {"provider": "test-provider", "api_key": "key"},
+            "request_overrides": None,
+        })
+
+        captured_kwargs = {}
+
+        class FakeAgent:
+            def __init__(self, **kwargs):
+                captured_kwargs.update(kwargs)
+                self._print_fn = None
+                self.thinking_callback = None
+
+            def run_conversation(self, user_message, task_id=None):
+                return {"final_response": ""}
+
+        class ImmediateThread:
+            def __init__(self, target, daemon=None, name=None):
+                self.target = target
+                self.daemon = daemon
+                self.name = name
+
+            def start(self):
+                self.target()
+
+        monkeypatch.setattr("cli.AIAgent", FakeAgent)
+        monkeypatch.setattr("cli.threading.Thread", ImmediateThread)
+        monkeypatch.setattr("cli._cprint", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(
+            "cli.ChatConsole",
+            lambda: SimpleNamespace(print=lambda *_args, **_kwargs: None),
+        )
+
+        HermesCLI._handle_background_command(cli_obj, "/background inspect provenance")
+
+        assert captured_kwargs["session_id"].startswith("bg_")
+        assert captured_kwargs["parent_session_id"] == "parent-session"
+        assert captured_kwargs["root_session_id"] == "root-session"
+        assert captured_kwargs["session_kind"] == "background_command"
+        assert captured_kwargs["creator_kind"] == "command"
+        assert captured_kwargs["creator_command"] == "/background"
+        assert captured_kwargs["is_user_facing"] is False

@@ -595,6 +595,8 @@ class SessionManager:
 
         kwargs = {
             "platform": "acp",
+            "session_kind": "acp",
+            "creator_kind": "acp",
             "enabled_toolsets": _expand_acp_enabled_toolsets(
                 ["hermes-acp"],
                 mcp_server_names=configured_mcp_servers,

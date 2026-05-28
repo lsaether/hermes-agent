@@ -95,6 +95,20 @@ class TestBranchCommandCLI:
         new_session = session_db.get_session(cli_instance.session_id)
         assert new_session["parent_session_id"] == original_id
 
+    def test_branch_stamps_session_provenance(self, cli_instance, session_db):
+        """Branch sessions should carry first-class taxonomy/provenance."""
+        from cli import HermesCLI
+        original_id = cli_instance.session_id
+
+        HermesCLI._handle_branch_command(cli_instance, "/branch")
+
+        new_session = session_db.get_session(cli_instance.session_id)
+        assert new_session["session_kind"] == "branch"
+        assert new_session["root_session_id"] == original_id
+        assert new_session["creator_kind"] == "command"
+        assert new_session["creator_command"] == "/branch"
+        assert new_session["is_user_facing"] == 1
+
     def test_branch_ends_original_session(self, cli_instance, session_db):
         """The original session should be marked as ended with 'branched' reason."""
         from cli import HermesCLI

@@ -111,6 +111,8 @@ def test_acp_real_agent_gets_session_db_for_recall(monkeypatch):
     assert isinstance(agent, CapturingAgent)
     assert captured["session_db"] is sentinel_db
     assert captured["platform"] == "acp"
+    assert captured["session_kind"] == "acp"
+    assert captured["creator_kind"] == "acp"
     assert captured["session_id"] == "acp-session"
 
 

@@ -313,3 +313,6 @@ def test_background_review_fork_skips_external_memory_plugins(monkeypatch):
         "the fork leaks harness prompts into the user's real memory "
         "namespace via on_turn_start / prefetch_all / sync_all."
     )
+    assert captured_kwargs.get("session_kind") == "background_review"
+    assert captured_kwargs.get("creator_kind") == "review"
+    assert captured_kwargs.get("is_user_facing") is False

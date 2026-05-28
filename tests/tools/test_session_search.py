@@ -129,6 +129,25 @@ class TestBrowseShape:
         assert result["mode"] == "browse"
         assert result["count"] >= 3
 
+    def test_browse_returns_session_provenance(self, db):
+        db.create_session(
+            "bg_session",
+            source="cli",
+            session_kind="background_command",
+            creator_kind="command",
+            creator_command="/background",
+            is_user_facing=False,
+        )
+        db.append_message("bg_session", role="user", content="background provenance")
+
+        result = json.loads(session_search(db=db))
+        row = next(r for r in result["results"] if r["session_id"] == "bg_session")
+        assert row["session_kind"] == "background_command"
+        assert row["root_session_id"] == "bg_session"
+        assert row["creator_kind"] == "command"
+        assert row["creator_command"] == "/background"
+        assert row["is_user_facing"] == 0
+
     def test_browse_excludes_current_session(self, db):
         _seed_modpack_sessions(db)
         result = json.loads(session_search(db=db, current_session_id="s_newest"))
@@ -165,6 +184,24 @@ class TestDiscoveryShape:
             assert "snippet" in hit
             assert "messages_before" in hit
             assert "messages_after" in hit
+
+    def test_discovery_returns_session_provenance(self, db):
+        db.create_session(
+            "branch_session",
+            source="cli",
+            session_kind="branch",
+            creator_kind="command",
+            creator_command="/branch",
+        )
+        db.append_message("branch_session", role="user", content="unique provenance needle")
+
+        result = json.loads(session_search(query="unique provenance", db=db))
+        hit = result["results"][0]
+        assert hit["session_kind"] == "branch"
+        assert hit["root_session_id"] == "branch_session"
+        assert hit["creator_kind"] == "command"
+        assert hit["creator_command"] == "/branch"
+        assert hit["is_user_facing"] == 1
 
     def test_match_message_id_is_anchor_in_window(self, db):
         _seed_modpack_sessions(db)
@@ -268,6 +305,26 @@ class TestScrollShape:
         # Scroll shape has no bookends
         assert "bookend_start" not in result
         assert "bookend_end" not in result
+
+    def test_scroll_session_meta_returns_session_provenance(self, db):
+        db.create_session(
+            "continuation",
+            source="cli",
+            session_kind="continuation",
+            creator_kind="compression",
+        )
+        anchor = db.append_message(
+            "continuation", role="user", content="scroll provenance marker"
+        )
+
+        result = json.loads(session_search(
+            session_id="continuation", around_message_id=anchor, window=1, db=db
+        ))
+        meta = result["session_meta"]
+        assert meta["session_kind"] == "continuation"
+        assert meta["root_session_id"] == "continuation"
+        assert meta["creator_kind"] == "compression"
+        assert meta["is_user_facing"] == 1
 
     def test_scroll_window_clamped_to_20(self, db):
         _seed_modpack_sessions(db)

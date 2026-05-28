@@ -129,6 +129,89 @@ def test_write_json_unrelated_value_error_re_raises(server):
         server.write_json({"x": 1})
 
 
+def test_background_agent_kwargs_stamps_background_command_provenance(server):
+    """TUI /background children should be typed before AIAgent persists them."""
+
+    class Agent:
+        session_id = "parent-session"
+        model = "fake/model"
+        base_url = None
+        api_key = "key"
+        provider = "openai"
+        api_mode = None
+        enabled_toolsets = ["terminal"]
+
+    kwargs = server._background_agent_kwargs(Agent(), "bg_task")
+
+    assert kwargs["session_kind"] == "background_command"
+    assert kwargs["creator_kind"] == "command"
+    assert kwargs["creator_command"] == "/background"
+    assert kwargs["parent_session_id"] == "parent-session"
+    assert kwargs["is_user_facing"] is False
+
+
+def test_session_branch_stamps_session_provenance(server, monkeypatch):
+    """TUI session.branch should persist and hand off branch provenance."""
+    created_kwargs = {}
+    agent_kwargs = {}
+
+    class _DB:
+        def get_session_title(self, _sid):
+            return "Original"
+
+        def get_next_title_in_lineage(self, title):
+            return f"{title} #2"
+
+        def create_session(self, session_id, **kwargs):
+            created_kwargs["session_id"] = session_id
+            created_kwargs.update(kwargs)
+
+        def get_session(self, _sid):
+            return {"root_session_id": "root-session"}
+
+        def append_message(self, **_kwargs):
+            pass
+
+        def set_session_title(self, *_args):
+            pass
+
+    def _fake_make_agent(sid, key, session_id=None, **kwargs):
+        agent_kwargs.update({"sid": sid, "key": key, "session_id": session_id, **kwargs})
+        return object()
+
+    sid = "tui-session"
+    server._sessions[sid] = {
+        "session_key": "old-session",
+        "history_lock": threading.Lock(),
+        "history": [{"role": "user", "content": "hello"}],
+        "cols": 100,
+    }
+    monkeypatch.setattr(server, "_get_db", lambda: _DB())
+    monkeypatch.setattr(server, "_new_session_key", lambda: "new-session")
+    monkeypatch.setattr(server, "_resolve_model", lambda: "test/model")
+    monkeypatch.setattr(server, "_make_agent", _fake_make_agent)
+    monkeypatch.setattr(server, "_init_session", lambda *args, **kwargs: None)
+
+    resp = server.handle_request({
+        "id": "r-branch",
+        "method": "session.branch",
+        "params": {"session_id": sid},
+    })
+
+    assert "error" not in resp
+    assert created_kwargs["session_id"] == "new-session"
+    assert created_kwargs["parent_session_id"] == "old-session"
+    assert created_kwargs["session_kind"] == "branch"
+    assert created_kwargs["creator_kind"] == "command"
+    assert created_kwargs["creator_command"] == "/branch"
+    assert created_kwargs["is_user_facing"] is True
+    assert agent_kwargs["parent_session_id"] == "old-session"
+    assert agent_kwargs["root_session_id"] == "root-session"
+    assert agent_kwargs["session_kind"] == "branch"
+    assert agent_kwargs["creator_kind"] == "command"
+    assert agent_kwargs["creator_command"] == "/branch"
+
+
 def test_write_json_non_serializable_payload_re_raises(server):
     """Non-JSON-safe payloads are programming errors — they must NOT be
     silently dropped via the False path (which would trigger a clean exit
