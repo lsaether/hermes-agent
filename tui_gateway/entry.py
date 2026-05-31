@@ -12,13 +12,22 @@ if _src_root and _src_root not in sys.path:
 sys.path = [p for p in sys.path if p not in {"", "."}]
 
 import json
+import logging
 import signal
 import time
 import traceback
 
 from tui_gateway import server
 from tui_gateway.server import _CRASH_LOG, dispatch, resolve_skin, write_json
+from tui_gateway.remote_bridge import start_remote_bridge_if_enabled
 from tui_gateway.transport import TeeTransport
+
+logger = logging.getLogger(__name__)
+
+# Handle for the background MCP tool-discovery thread (see main()).  The first
+# agent build briefly joins this so already-spawning fast servers land before
+# the agent snapshots its tool list (see wait_for_mcp_discovery).
+_mcp_discovery_thread = None
 
 
 def _install_sidecar_publisher() -> None:
@@ -149,11 +158,11 @@ def _log_signal(signum: int, frame) -> None:
 # ``hermes --tui``) imports cleanly there.  SIGBREAK (Windows' Ctrl+Break)
 # is installed when available as a weaker equivalent of SIGHUP.
 if hasattr(signal, "SIGPIPE"):
-    signal.signal(signal.SIGPIPE, signal.SIG_IGN)
+    signal.signal(signal.SIGPIPE, signal.SIG_IGN)  # windows-footgun: ok - guarded by hasattr
 if hasattr(signal, "SIGTERM"):
     signal.signal(signal.SIGTERM, _log_signal)
 if hasattr(signal, "SIGHUP"):
-    signal.signal(signal.SIGHUP, _log_signal)
+    signal.signal(signal.SIGHUP, _log_signal)  # windows-footgun: ok - guarded by hasattr
 elif hasattr(signal, "SIGBREAK"):
     # Windows-only: Ctrl+Break in a console window delivers SIGBREAK.
     # Route it through the same handler so kills are diagnosable.
@@ -184,42 +193,86 @@ def _log_exit(reason: str) -> None:
     print(f"[gateway-exit] {reason}", file=sys.stderr, flush=True)
 
 
+def wait_for_mcp_discovery(timeout: float = 0.75) -> None:
+    """Briefly block until background MCP discovery finishes, up to ``timeout``.
+
+    MCP discovery runs in a daemon thread spawned at startup (see main()) so a
+    slow/dead server can't freeze ``gateway.ready``.  But the agent snapshots
+    its tool list ONCE at build time and never re-reads it, so a reachable-but-
+    slow server that finishes connecting *after* the first prompt would be
+    invisible for the whole session.  Joining with a short bounded timeout
+    before the first agent build lets already-spawning fast servers land
+    without re-introducing the startup hang: a dead server simply isn't waited
+    on beyond ``timeout``.  No-op when no discovery thread was started.
+    """
+    thread = _mcp_discovery_thread
+    if thread is None or not thread.is_alive():
+        return
+    thread.join(timeout=timeout)
+
+
 def main():
     _install_sidecar_publisher()
+    remote_bridge = start_remote_bridge_if_enabled()
 
-    # MCP tool discovery — inline is safe here: TUI entry is a plain
-    # sync loop with no asyncio event loop to block.  Previously ran as
-    # a model_tools.py module-level side effect; moved to explicit
-    # startup calls to avoid freezing the gateway's loop on lazy import
-    # (#16856).
+    # MCP tool discovery — runs in a background daemon thread so a slow or
+    # unreachable MCP server can't freeze TUI startup.  Previously this ran
+    # inline before ``gateway.ready``, which meant any configured-but-down
+    # server stalled the whole shell on "summoning hermes…" for the full
+    # connect-retry backoff (e.g. a dead stdio/http server burns 1+2+4s of
+    # retries → ~7s of dead air before the composer appears).  Discovery is
+    # idempotent and registers tools into the shared registry as servers
+    # connect.  The agent isn't built until the first prompt, at which point
+    # ``_make_agent`` briefly joins this thread (``wait_for_mcp_discovery``,
+    # bounded) so already-spawning fast servers land in the tool snapshot —
+    # a dead server is simply not waited on past the bound.  ``/reload-mcp``
+    # rebuilds the snapshot for servers that connect later in the session.
     #
     # Cold-start guard: importing ``tools.mcp_tool`` transitively pulls the
     # full MCP SDK (mcp, pydantic, httpx, jsonschema, starlette parsers —
-    # ~200ms on macOS), which runs on the TUI's critical path before
-    # ``gateway.ready`` can be emitted.  The overwhelming majority of users
-    # have no ``mcp_servers`` configured, in which case every byte of that
-    # import is wasted.  Check the config first (cheap — it's already been
-    # loaded once by ``_config_mtime`` elsewhere) and only pay the import
-    # cost when there's actually MCP work to do.
+    # ~200ms on macOS).  The overwhelming majority of users have no
+    # ``mcp_servers`` configured, in which case every byte of that import is
+    # wasted.  Check the config first (cheap) and only spawn the discovery
+    # thread when there's actually MCP work to do, so the import cost stays
+    # off the path entirely for the common case.
     try:
         from hermes_cli.config import read_raw_config
         _mcp_servers = (read_raw_config() or {}).get("mcp_servers")
         _has_mcp_servers = isinstance(_mcp_servers, dict) and len(_mcp_servers) > 0
     except Exception:
-        # Be conservative: if we can't decide, fall back to the old
-        # behaviour and let the discovery path handle its own errors.
+        # Be conservative: if we can't decide, fall back to attempting
+        # discovery (still backgrounded, so it can't block startup).
         _has_mcp_servers = True
     if _has_mcp_servers:
-        try:
-            from tools.mcp_tool import discover_mcp_tools
-            discover_mcp_tools()
-        except Exception:
-            pass
+        def _discover_mcp_background() -> None:
+            try:
+                from tools.mcp_tool import discover_mcp_tools
+                discover_mcp_tools()
+            except Exception:
+                logger.warning(
+                    "Background MCP tool discovery failed", exc_info=True
+                )
+
+        import threading as _mcp_threading
+        _mcp_thread = _mcp_threading.Thread(
+            target=_discover_mcp_background,
+            name="tui-mcp-discovery",
+            daemon=True,
+        )
+        _mcp_thread.start()
+        # Publish the handle so the first agent build can briefly wait for
+        # already-spawning fast servers to land (see wait_for_mcp_discovery).
+        global _mcp_discovery_thread
+        _mcp_discovery_thread = _mcp_thread
+
+    ready_payload = {"skin": resolve_skin()}
+    if remote_bridge is not None:
+        ready_payload["remote_bridge"] = remote_bridge.public_info()
 
     if not write_json({
         "jsonrpc": "2.0",
         "method": "event",
-        "params": {"type": "gateway.ready", "payload": {"skin": resolve_skin()}},
+        "params": {"type": "gateway.ready", "payload": ready_payload},
     }):
         _log_exit("startup write failed (broken stdout pipe before first event)")
         sys.exit(0)

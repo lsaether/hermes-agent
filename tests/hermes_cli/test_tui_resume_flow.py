@@ -16,6 +16,7 @@ def _args(**overrides):
         "toolsets": None,
         "tui": True,
         "tui_dev": False,
+        "remote_control": False,
     }
     base.update(overrides)
     return Namespace(**base)
@@ -201,6 +202,7 @@ def test_cmd_chat_tui_forwards_chat_flags(monkeypatch, main_mod):
                 pass_session_id=True,
                 max_turns=7,
                 accept_hooks=True,
+                remote_control=True,
             )
         )
 
@@ -214,6 +216,7 @@ def test_cmd_chat_tui_forwards_chat_flags(monkeypatch, main_mod):
     assert captured["pass_session_id"] is True
     assert captured["max_turns"] == 7
     assert captured["accept_hooks"] is True
+    assert captured["remote_control"] is True
 
 
 def test_main_top_level_tui_accepts_toolsets(monkeypatch, main_mod):
@@ -638,6 +641,60 @@ def test_oneshot_rejects_invalid_only_toolsets(monkeypatch, capsys):
     assert "did not contain any valid toolsets" in err
 
 
+def test_oneshot_fails_closed_on_empty_final_response(monkeypatch, capsys):
+    _stub_plugin_discovery(monkeypatch)
+    import hermes_cli.oneshot as oneshot_mod
+
+    monkeypatch.setattr(oneshot_mod, "_run_agent", lambda *_args, **_kwargs: "")
+
+    assert oneshot_mod.run_oneshot("hello") == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "no final response" in captured.err
+
+
+def test_oneshot_prints_nonempty_final_response(monkeypatch, capsys):
+    _stub_plugin_discovery(monkeypatch)
+    import hermes_cli.oneshot as oneshot_mod
+
+    monkeypatch.setattr(oneshot_mod, "_run_agent", lambda *_args, **_kwargs: "done")
+
+    assert oneshot_mod.run_oneshot("hello") == 0
+    captured = capsys.readouterr()
+    assert captured.out == "done\n"
+    assert captured.err == ""
+
+
+def test_oneshot_fails_closed_on_agent_exception(monkeypatch, capsys):
+    _stub_plugin_discovery(monkeypatch)
+    import hermes_cli.oneshot as oneshot_mod
+
+    def _boom(*_args, **_kwargs):
+        raise OSError("not a TTY")
+
+    monkeypatch.setattr(oneshot_mod, "_run_agent", _boom)
+
+    assert oneshot_mod.run_oneshot("hello") == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "agent failed" in captured.err
+    assert "not a TTY" in captured.err
+
+
+def test_oneshot_reraises_keyboard_interrupt(monkeypatch):
+    _stub_plugin_discovery(monkeypatch)
+    import hermes_cli.oneshot as oneshot_mod
+    import pytest as _pytest
+
+    def _interrupt(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(oneshot_mod, "_run_agent", _interrupt)
+
+    with _pytest.raises(KeyboardInterrupt):
+        oneshot_mod.run_oneshot("hello")
+
+
 def test_oneshot_filters_invalid_toolsets_before_redirect(monkeypatch, capsys):
     _stub_plugin_discovery(monkeypatch)
     from hermes_cli.oneshot import _validate_explicit_toolsets
@@ -840,6 +897,68 @@ def test_launch_tui_exports_model_provider_and_toolsets(monkeypatch, main_mod):
     assert active_path_during_call == active_path
     assert not active_path.exists()
     assert env["NODE_ENV"] == "production"
+
+
+def test_launch_tui_remote_control_sets_bridge_env(monkeypatch, main_mod):
+    captured = {}
+
+    monkeypatch.setattr(
+        main_mod,
+        "_make_tui_argv",
+        lambda tui_dir, tui_dev: (["node", "dist/entry.js"], Path(".")),
+    )
+    monkeypatch.setattr(
+        main_mod.subprocess,
+        "call",
+        lambda argv, cwd=None, env=None: captured.update({"env": env}) or 1,
+    )
+
+    with pytest.raises(SystemExit):
+        main_mod._launch_tui(remote_control=True)
+
+    assert captured["env"]["HERMES_TUI_REMOTE_BRIDGE"] == "1"
+
+
+def test_launch_tui_without_remote_control_leaves_bridge_env_unset(monkeypatch, main_mod):
+    captured = {}
+
+    monkeypatch.delenv("HERMES_TUI_REMOTE_BRIDGE", raising=False)
+    monkeypatch.setattr(
+        main_mod,
+        "_make_tui_argv",
+        lambda tui_dir, tui_dev: (["node", "dist/entry.js"], Path(".")),
+    )
+    monkeypatch.setattr(
+        main_mod.subprocess,
+        "call",
+        lambda argv, cwd=None, env=None: captured.update({"env": env}) or 1,
+    )
+
+    with pytest.raises(SystemExit):
+        main_mod._launch_tui()
+
+    assert "HERMES_TUI_REMOTE_BRIDGE" not in captured["env"]
+
+
+def test_launch_tui_remote_control_overrides_disabled_bridge_env(monkeypatch, main_mod):
+    captured = {}
+
+    monkeypatch.setenv("HERMES_TUI_REMOTE_BRIDGE", "0")
+    monkeypatch.setattr(
+        main_mod,
+        "_make_tui_argv",
+        lambda tui_dir, tui_dev: (["node", "dist/entry.js"], Path(".")),
+    )
+    monkeypatch.setattr(
+        main_mod.subprocess,
+        "call",
+        lambda argv, cwd=None, env=None: captured.update({"env": env}) or 1,
+    )
+
+    with pytest.raises(SystemExit):
+        main_mod._launch_tui(remote_control=True)
+
+    assert captured["env"]["HERMES_TUI_REMOTE_BRIDGE"] == "1"
 
 
 def test_launch_tui_exit_code_42_relaunches_update(monkeypatch, main_mod):
